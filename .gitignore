@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+tsconfig.tsbuildinfo
+.devteam/
+.harness/
+smoke.mjs
+smoke-note.tmp
+tsconfig.harness.json

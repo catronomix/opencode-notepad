@@ -1,0 +1,50 @@
+{
+  "name": "opencode-note",
+  "version": "0.1.0",
+  "description": "Per-chat scratchpad overlay for opencode: insert, save, load, format and /btw without touching the chat transcript",
+  "license": "MIT",
+  "author": "catronomix",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/catronomix/opencode-note.git"
+  },
+  "homepage": "https://github.com/catronomix/opencode-note#readme",
+  "bugs": {
+    "url": "https://github.com/catronomix/opencode-note/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "scratchpad",
+    "note"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.3.2",
+    "@opentui/core": ">=0.9.7",
+    "@opentui/solid": ">=0.9.7",
+    "solid-js": ">=1.9.0"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.3.2",
+    "@opencode/theme": "^2.3.2",
+    "@opentui/core": "^0.9.7",
+    "@opentui/solid": "^0.9.7",
+    "@types/node": "^26.6.6",
+    "solid-js": "^1.9.20",
+    "typescript": "^5.9.3"
+  }
+}

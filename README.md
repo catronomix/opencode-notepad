@@ -1,0 +1,103 @@
+# opencode-note
+
+A per-chat scratchpad for the OpenCode terminal UI. Press `/note` (or the palette
+command) and a near-fullscreen editor opens over the chat: write, mark a
+selection, wrap it in Markdown, save it to a file, or hand it to the model — all
+without the note ever entering the chat transcript.
+
+Each chat has its own note. Notes keyed by session live in the plugin's durable
+store on disk, not in the conversation, so they survive restarts and never cost
+context.
+
+## Install
+
+The package has a server part (`.` → `src/index.ts`) and a TUI part
+(`./tui` → `src/tui.tsx`), so a single entry loads both.
+
+```jsonc title="~/.config/opencode/opencode.jsonc"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    // from a checkout, with options
+    { "package": "C:/GITHUB/opencode-note", "options": { "indent": 2 } },
+  ],
+}
+```
+
+`opencode plugin add opencode-note` works too once the package is published.
+
+For a source-only install (OpenCode resolves `@opencode/plugin`, `@opentui/*`
+and `solid-js` from its own runtime), copy the flat sources into
+`~/.config/opencode/plugins/opencode-note/`:
+
+```sh
+cp src/*.ts src/*.tsx ~/.config/opencode/plugins/opencode-note/
+```
+
+OpenCode discovers that directory by file name (`index` and `tui`). Restart the
+TUI to pick it up.
+
+## Configuration
+
+| option   | default | meaning                                                            |
+| -------- | ------- | ------------------------------------------------------------------ |
+| `indent` | `2`     | Indentation inserted by <kbd>Ctrl</kbd>+<kbd>Return</kbd>. A number of spaces or a literal string such as `"\t"`. |
+
+## Keys
+
+| key                                       | action                                              |
+| ----------------------------------------- | --------------------------------------------------- |
+| <kbd>/note</kbd>, palette “Note”           | open the scratchpad for the current chat            |
+| <kbd>Esc</kbd>                             | close the scratchpad, or cancel a running call      |
+| <kbd>Tab</kbd>                             | move focus between the editor and the button bar    |
+| <kbd>Return</kbd>                          | newline                                             |
+| <kbd>Ctrl</kbd>+<kbd>Return</kbd>          | newline and indent                                  |
+| <kbd>Home</kbd> / <kbd>End</kbd>           | start / end of the line                             |
+| <kbd>PgUp</kbd> / <kbd>PgDn</kbd>          | a screen up / down (<kbd>Shift</kbd> selects)       |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd>               | copy the selection                                  |
+| <kbd>←</kbd> <kbd>→</kbd> in the bar       | pick a button                                       |
+| <kbd>Return</kbd> / <kbd>Space</kbd>       | press the selected button                           |
+
+Typing one of `* ~ - ( [ { % $ < \` ' " | : ^ _ /` with text selected wraps the
+selection instead of replacing it, and the inner text stays selected so the
+wrapper chains: select a word, press `*` twice, get `**word**`.
+
+## Buttons
+
+The bracketed letter is the shortcut — pressing it presses the button.
+
+| button     | action                                                                    |
+| ---------- | ------------------------------------------------------------------------- |
+| `[i]nsert` | put the note (or the selected fragment) into the chat input and close      |
+| `[c]lear`  | empty the note                                                             |
+| `[s]ave`   | prompt for a file name (default `NOTE.md`) and write it to the project     |
+| `[l]oad`   | `@./`-style path completion; <kbd>Return</kbd> opens the first match       |
+| `[f]ormat` | rewrite the note with the current model                                    |
+| `[b]tw`    | answer the note as a side question, with the chat as context, and append   |
+
+`Format` and `Btw` use the stateless generation endpoint: the request never
+belongs to a session, so the note never leaks into the transcript and the answer
+never appears as an assistant turn. `Btw` reads the session's messages through
+the client API and inlines them into the prompt instead.
+
+## Notes and limits
+
+- The scratchpad is a plugin route: a full-screen page with a centred panel at
+  70% width and height. The TUI plugin API has no floating layer above the chat,
+  so the chat is hidden while the note is open.
+- `Insert` writes into the chat input that has focus after the page closes. When
+  no editor is available it copies the text with OSC 52 and shows a toast.
+- A brand-new chat has no session yet; opening the note commits one through the
+  API (no prompt, no model call) so the note has somewhere stable to live.
+- Deleting a chat deletes its note.
+
+## Development
+
+```sh
+npm install
+npm run typecheck
+```
+
+## License
+
+MIT
