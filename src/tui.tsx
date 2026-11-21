@@ -284,15 +284,34 @@ function Note(props: NoteProps) {
   const colors = {
     background: theme.background.base,
     panel: theme.background.raised.base,
-    border: theme.border.base,
+    // The note box's border ink doubles as the title chip's background, so the
+    // chip is the border's own colour inverted with the panel behind the text.
+    border: theme.markdown.heading,
     text: theme.text.base,
     muted: theme.text.muted,
     faint: theme.text.faint,
     accent: theme.text.action.primary.base,
+    emphasis: theme.markdown.emphasis,
+    // The popup's border ink. purple.200 is the theme's own scale rather than a
+    // value copied out of it; a theme without that scale falls back to the
+    // accent hue. The resolved theme exposes more hue scales than its type names.
+    popupBorder: (theme.hue as unknown as Record<string, Record<number, RGBA>>).purple?.[200] ?? theme.hue.accent[200],
     // The theme's selection token resolves to a transparent black here, which
     // draws nothing; the action accent is the visible selection block.
     selection: theme.text.action.primary.base,
   }
+
+  /**
+   * A colour's channels scaled by `factor`. The popup surfaces are derived from
+   * the note box's own background rather than declared: +10% brightness for the
+   * popup, and the popup's field 20% darker than that.
+   */
+  const tone = (color: unknown, factor: number): RGBA => {
+    const hex = shade(color, factor)
+    return hex === undefined ? (color as RGBA) : RGBA.fromHex(hex)
+  }
+  const popupFill = tone(colors.panel, 1.1)
+  const popupField = tone(popupFill, 0.8)
 
   const [_size, _setSize] = createSignal({
     width: Math.max(1, context.renderer.width),
@@ -1159,25 +1178,21 @@ function Note(props: NoteProps) {
     Math.max(1, Math.min(Math.max(1, innerWidth() - 2), Math.max(40, Math.floor(size().width * 0.6)), 72))
 
   /**
-   * The dialog's one input row. Its ink is the popup border's colour and its
-   * background is the panel's own colour, darkened, so the row reads as a field
-   * inside the dialog rather than as a second accent. The caret is a block of
-   * the undarkened panel colour: reversed against the field, never a coloured
-   * slab.
+   * The dialog's one input row. Its ink is the theme's markdown emphasis and its
+   * background is the popup surface a fifth darker, so the row reads as a field
+   * inside the popup rather than as a second accent. The caret is a block of the
+   * undarkened popup surface: reversed against the field.
    */
   const inputRow = (placeholder: string) => {
     const width = Math.max(1, dialogWidth() - 4)
-    const ink = colors.accent
-    // Scene chunks take RGBA objects, not hex strings, so a shaded colour has to
-    // be parsed back into one before it reaches StyledText.
-    const shaded = shade(colors.panel, 0.25)
-    const field = shaded === undefined ? colors.border : (RGBA.fromHex(shaded) as unknown)
+    const ink = colors.emphasis
+    const field = popupField
     const { text, caret } = dialogValue()
     const at = Math.max(0, Math.min(text.length, caret))
     const runs: Array<{ text: string; fg?: unknown; bg?: unknown }> = [{ text: "> ", fg: ink, bg: field }]
     let used = 2
     if (!text) {
-      runs.push({ text: " ", fg: ink, bg: caretOn() ? colors.panel : field })
+      runs.push({ text: " ", fg: ink, bg: caretOn() ? popupFill : field })
       used += 1
       for (const char of placeholder) {
         if (used >= width) break
@@ -1191,7 +1206,7 @@ function Note(props: NoteProps) {
         used += head.length
       }
       const glyph = text.charAt(at) || " "
-      runs.push({ text: glyph, fg: ink, bg: caretOn() ? colors.panel : field })
+      runs.push({ text: glyph, fg: ink, bg: caretOn() ? popupFill : field })
       used += 1
       const tail = text.slice(at + 1)
       if (tail) {
@@ -1336,12 +1351,12 @@ function Note(props: NoteProps) {
         height={DIALOG_HEIGHT}
         border
         borderStyle="rounded"
-        borderColor={colors.accent}
+        borderColor={colors.popupBorder}
         // OpenTUI repaints a focused box's border with its own focus colour
-        // (#00AAFF by default), which would stop the border matching the input
-        // row's ink. Pin both states to the ink the row uses.
-        focusedBorderColor={colors.accent}
-        backgroundColor={colors.panel}
+        // (#00AAFF by default), which would hide the theme's purple.200; pin both
+        // states to the popup's own border ink.
+        focusedBorderColor={colors.popupBorder}
+        backgroundColor={popupFill}
         flexDirection="column"
         paddingLeft={1}
         paddingRight={1}

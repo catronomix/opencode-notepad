@@ -100,16 +100,19 @@ export function leadingWhitespace(line: string): string {
 }
 
 /**
- * A colour scaled towards black, so a surface can be tinted without leaving the
- * theme. Accepts a hex string or a resolved `RGBA`; `undefined` when the value
- * is neither, so the caller can fall back rather than draw a wrong colour.
+ * A colour whose channels are scaled by `factor`: below 1 towards black, above
+ * 1 towards white (each channel clamped at 255). Lets a surface be tinted or
+ * lifted without leaving the theme. Accepts a hex string or a resolved `RGBA`;
+ * `undefined` when the value is neither, so the caller can fall back rather
+ * than draw a wrong colour.
  */
 export function shade(color: unknown, factor: number): string | undefined {
-  const scale = Math.max(0, Math.min(1, factor))
+  const scale = Math.max(0, factor)
+  const channel = (value: number) => Math.max(0, Math.min(255, Math.round(value * scale)))
   const hex = typeof color === "string" ? color.trim() : ""
   const match = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(hex)
   const pack = (r: number, g: number, b: number) =>
-    `#${((Math.round(r * scale) << 16) | (Math.round(g * scale) << 8) | Math.round(b * scale)).toString(16).padStart(6, "0")}`
+    `#${((channel(r) << 16) | (channel(g) << 8) | channel(b)).toString(16).padStart(6, "0")}`
   if (match) {
     const digits = match[1]
     const full = digits.length === 3 ? digits.split("").map((digit) => digit + digit).join("") : digits.slice(0, 6)
