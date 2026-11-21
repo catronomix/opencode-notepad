@@ -1,4 +1,4 @@
-# opencode-note
+# opencode-notepad
 
 A per-chat scratchpad for the OpenCode terminal UI. Press `/note` (or the palette
 command) and a near-fullscreen editor opens over the chat: write, mark a
@@ -19,19 +19,19 @@ The package has a server part (`.` → `src/index.ts`) and a TUI part
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     // from a checkout, with options
-    { "package": "C:/GITHUB/opencode-note", "options": { "indent": 2 } },
+    { "package": "C:/GITHUB/opencode-notepad", "options": { "indent": 2 } },
   ],
 }
 ```
 
-`opencode plugin add opencode-note` works too once the package is published.
+`opencode plugin add opencode-notepad` works too once the package is published.
 
 For a source-only install (OpenCode resolves `@opencode/plugin`, `@opentui/*`
 and `solid-js` from its own runtime), copy the flat sources into
-`~/.config/opencode/plugins/opencode-note/`:
+`~/.config/opencode/plugins/opencode-notepad/`:
 
 ```sh
-cp src/*.ts src/*.tsx ~/.config/opencode/plugins/opencode-note/
+cp src/*.ts src/*.tsx ~/.config/opencode/plugins/opencode-notepad/
 ```
 
 OpenCode discovers that directory by file name (`index` and `tui`). Restart the

@@ -1,5 +1,5 @@
 {
-  "name": "opencode-note",
+  "name": "opencode-notepad",
   "version": "0.1.0",
   "description": "Per-chat scratchpad overlay for opencode: insert, save, load, format and /btw without touching the chat transcript",
   "license": "MIT",
@@ -7,11 +7,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/catronomix/opencode-note.git"
+    "url": "git+https://github.com/catronomix/opencode-notepad.git"
   },
-  "homepage": "https://github.com/catronomix/opencode-note#readme",
+  "homepage": "https://github.com/catronomix/opencode-notepad#readme",
   "bugs": {
-    "url": "https://github.com/catronomix/opencode-note/issues"
+    "url": "https://github.com/catronomix/opencode-notepad/issues"
   },
   "keywords": [
     "opencode",

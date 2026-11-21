@@ -1,5 +1,5 @@
 /**
- * Server half of opencode-note.
+ * Server half of opencode-notepad.
  *
  * Notes are owned by the TUI half, which keeps them in its durable store and
  * clears them when the host reports `session.deleted`. This half exists so the
@@ -10,7 +10,7 @@ import { Plugin } from "@opencode/plugin"
 import { noteKey } from "./keys.ts"
 
 export default Plugin.define({
-  id: "opencode-note",
+  id: "opencode-notepad",
   async setup(context) {
     const controller = new AbortController()
 
@@ -20,14 +20,14 @@ export default Plugin.define({
         try {
           await context.storage.remove(noteKey(event.data.sessionID))
         } catch (error) {
-          console.error("opencode-note: could not clear the note for a deleted session", error)
+          console.error("opencode-notepad: could not clear the note for a deleted session", error)
         }
       }
     }
 
     void watch().catch((error) => {
       if (controller.signal.aborted) return
-      console.error("opencode-note: session cleanup stopped", error)
+      console.error("opencode-notepad: session cleanup stopped", error)
     })
 
     return () => {

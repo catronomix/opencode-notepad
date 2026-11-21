@@ -8,7 +8,7 @@
  * route that opens the note.
  */
 
-export const NOTE_KEY_PREFIX = "opencode-note"
+export const NOTE_KEY_PREFIX = "opencode-notepad"
 
 /** What one segment may contain, mirroring the host's validator. */
 const SEGMENT = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
@@ -30,7 +30,7 @@ export function storageSegment(value: string): string {
 }
 
 /**
- * Durable key for one session's note, e.g. `opencode-note.ses_e0166d823ffe`.
+ * Durable key for one session's note, e.g. `opencode-notepad.ses_e0166d823ffe`.
  * The TUI namespaces it further (`plugin.<id>.<key>`), and every segment of the
  * resulting path must be valid.
  */

@@ -4,7 +4,7 @@ Context for agents working in this repository.
 
 ## What this is
 
-An OpenCode plugin (`opencode-note`) with two parts:
+An OpenCode plugin (`opencode-notepad`) with two parts:
 
 - `src/index.ts` — server part: clears a deleted chat's note from storage.
 - `src/tui.tsx` — TUI part: the `/note` route, editor, picker and button bar.
@@ -14,7 +14,7 @@ An OpenCode plugin (`opencode-note`) with two parts:
 
 ## Rules
 
-- Notes are keyed by session (`opencode-note:<sessionID>`) in `context.storage`.
+- Notes are keyed by session (`opencode-notepad.<sessionID>`) in `context.storage`.
   Never put note text into a session message or a prompt that belongs to a
   session.
 - `Format` and `Btw` must keep using `client.experimental.generate.text`; the

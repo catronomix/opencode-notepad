@@ -1,5 +1,5 @@
 /**
- * TUI half of opencode-note: a per-session scratchpad that stays out of the
+ * TUI half of opencode-notepad: a per-session scratchpad that stays out of the
  * chat transcript.
  *
  * The page is a plugin route, so it owns the whole screen while it is open: a
@@ -49,7 +49,7 @@ import {
   type DialogState,
 } from "./rules.ts"
 
-const PAGE = "opencode-note"
+const PAGE = "opencode-notepad"
 
 const BUTTONS = [
   { key: "i", label: "nsert", title: "Insert the note into the chat input" },
@@ -90,7 +90,7 @@ interface PageState {
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export default Plugin.define({
-  id: "opencode-note.tui",
+  id: "opencode-notepad.tui",
   async setup(context) {
     // The page is a fresh component on every open; this is the state a route
     // reload cannot carry (renderable identity).
@@ -193,7 +193,7 @@ export default Plugin.define({
               target.insertText(insert)
               return
             } catch (error) {
-              console.error("opencode-note: could not insert into the chat input", error)
+              console.error("opencode-notepad: could not insert into the chat input", error)
               context.ui.toast.show({ title: "Note", message: `Could not insert the note: ${messageOf(error)}`, variant: "error" })
               return
             }
@@ -224,7 +224,7 @@ export default Plugin.define({
           page = undefined
           return (
             <box width="100%" height="100%" backgroundColor={context.theme.background.base} padding={1}>
-              <text content="opencode-note: no session" fg={context.theme.text.muted} />
+              <text content="opencode-notepad: no session" fg={context.theme.text.muted} />
             </box>
           )
         }
@@ -241,7 +241,7 @@ export default Plugin.define({
           draft.text = ""
         })
       } catch (error) {
-        console.error("opencode-note: could not clear the note of a deleted session", error)
+        console.error("opencode-notepad: could not clear the note of a deleted session", error)
       }
     })
 
@@ -250,7 +250,7 @@ export default Plugin.define({
       priority: 10,
       commands: [
         {
-          id: "opencode-note.open",
+          id: "opencode-notepad.open",
           title: "Note",
           description: "Open the scratchpad for this chat",
           group: "Note",
@@ -850,7 +850,7 @@ function Note(props: NoteProps) {
       try {
         conversation = transcriptOf(await context.client.session.context({ sessionID: props.sessionID }))
       } catch (error) {
-        console.error("opencode-note: could not read the chat context for /btw", error)
+        console.error("opencode-notepad: could not read the chat context for /btw", error)
       }
       const result = await context.client.experimental.generate.text(
         { prompt: btwRequest(question, conversation), model: modelRef() },
@@ -1003,7 +1003,7 @@ function Note(props: NoteProps) {
     mode: "global",
     priority: 1000,
     enabled: () => !busy(),
-    commands: [{ id: "opencode-note.escape", bind: "escape", run: () => requestClose() }],
+    commands: [{ id: "opencode-notepad.escape", bind: "escape", run: () => requestClose() }],
   }))
 
   // Which layer is live follows the focus: the textarea handles the editor, the
@@ -1014,35 +1014,35 @@ function Note(props: NoteProps) {
     priority: 110,
     enabled: () => mode() === "editor" && !busy() && dialog() === null,
     commands: [
-      { id: "opencode-note.editor.buttons", bind: "tab", run: () => { if (guardedTab()) focusButtons() } },
+      { id: "opencode-notepad.editor.buttons", bind: "tab", run: () => { if (guardedTab()) focusButtons() } },
       // Home/End stay on the current line. The plain keys reach the textarea's
       // own key map; the shifted ones are claimed by the host's
       // `input.select.buffer.home`/`end` bindings first, so they are reclaimed
       // here at a higher priority and forwarded to the textarea's line methods.
-      { id: "opencode-note.editor.line-home", bind: "home", run: () => moveLineEdge("home", false) },
-      { id: "opencode-note.editor.line-end", bind: "end", run: () => moveLineEdge("end", false) },
-      { id: "opencode-note.editor.select-line-home", bind: "shift+home", run: () => moveLineEdge("home", true) },
-      { id: "opencode-note.editor.select-line-end", bind: "shift+end", run: () => moveLineEdge("end", true) },
+      { id: "opencode-notepad.editor.line-home", bind: "home", run: () => moveLineEdge("home", false) },
+      { id: "opencode-notepad.editor.line-end", bind: "end", run: () => moveLineEdge("end", false) },
+      { id: "opencode-notepad.editor.select-line-home", bind: "shift+home", run: () => moveLineEdge("home", true) },
+      { id: "opencode-notepad.editor.select-line-end", bind: "shift+end", run: () => moveLineEdge("end", true) },
       // Enter belongs to the note, but OpenCode binds a bare `return` to
       // `input.submit` for the focused editor and consumes it before the
       // textarea sees it. Claiming it here (higher priority) restores the
       // newline. Ctrl+Return is the indented variant and is bound to
       // `input.newline` in the host, so it is claimed at the same priority —
       // otherwise the host inserts its newline with no indentation.
-      { id: "opencode-note.editor.newline", bind: NEWLINE_BIND, run: () => { if (guardedNewline()) addNewline(false) } },
+      { id: "opencode-notepad.editor.newline", bind: NEWLINE_BIND, run: () => { if (guardedNewline()) addNewline(false) } },
       {
-        id: "opencode-note.editor.indent-newline",
+        id: "opencode-notepad.editor.indent-newline",
         bind: "ctrl+return,linefeed",
         run: () => { if (guardedNewline()) addNewline(true) },
       },
       // PageUp/PageDown are bound to the message list by the host; the note
       // claims both forms so a page move lands in the editor, with the
       // selection when Shift is held.
-      { id: "opencode-note.editor.page-up", bind: "pageup", run: () => movePage(-1, false) },
-      { id: "opencode-note.editor.page-down", bind: "pagedown", run: () => movePage(1, false) },
-      { id: "opencode-note.editor.select-page-up", bind: "shift+pageup", run: () => movePage(-1, true) },
-      { id: "opencode-note.editor.select-page-down", bind: "shift+pagedown", run: () => movePage(1, true) },
-      { id: "opencode-note.editor.copy", bind: "ctrl+c,ctrl+insert", run: () => copySelection() },
+      { id: "opencode-notepad.editor.page-up", bind: "pageup", run: () => movePage(-1, false) },
+      { id: "opencode-notepad.editor.page-down", bind: "pagedown", run: () => movePage(1, false) },
+      { id: "opencode-notepad.editor.select-page-up", bind: "shift+pageup", run: () => movePage(-1, true) },
+      { id: "opencode-notepad.editor.select-page-down", bind: "shift+pagedown", run: () => movePage(1, true) },
+      { id: "opencode-notepad.editor.copy", bind: "ctrl+c,ctrl+insert", run: () => copySelection() },
     ],
   }))
 
@@ -1051,20 +1051,20 @@ function Note(props: NoteProps) {
     priority: 120,
     enabled: () => mode() === "buttons" && !busy() && dialog() === null,
     commands: [
-      { id: "opencode-note.buttons.editor", bind: "tab", run: () => { if (guardedTab()) focusEditor() } },
+      { id: "opencode-notepad.buttons.editor", bind: "tab", run: () => { if (guardedTab()) focusEditor() } },
       {
-        id: "opencode-note.buttons.prev",
+        id: "opencode-notepad.buttons.prev",
         bind: "left,up,shift+tab",
         run: () => setCursor((index) => (index + BUTTONS.length - 1) % BUTTONS.length),
       },
       {
-        id: "opencode-note.buttons.next",
+        id: "opencode-notepad.buttons.next",
         bind: "right,down",
         run: () => setCursor((index) => (index + 1) % BUTTONS.length),
       },
-      { id: "opencode-note.buttons.press", bind: "return,enter,space", run: () => pressButton(cursor()) },
+      { id: "opencode-notepad.buttons.press", bind: "return,enter,space", run: () => pressButton(cursor()) },
       ...BUTTONS.map((button) => ({
-        id: `opencode-note.buttons.${button.key}`,
+        id: `opencode-notepad.buttons.${button.key}`,
         bind: button.key,
         run: () => pressKey(button.key),
       })),
@@ -1075,7 +1075,7 @@ function Note(props: NoteProps) {
     mode: "global",
     priority: 130,
     enabled: () => busy() !== null,
-    commands: [{ id: "opencode-note.busy.cancel", bind: "escape", run: () => cancelWork() }],
+    commands: [{ id: "opencode-notepad.busy.cancel", bind: "escape", run: () => cancelWork() }],
   }))
 
   // ---- rendering -----------------------------------------------------------
