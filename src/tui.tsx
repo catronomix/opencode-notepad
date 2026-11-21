@@ -12,9 +12,11 @@
 import {
   StyledText,
   defaultTextareaKeyBindings,
+  isEditBufferRenderable,
   type BoxRenderable,
   type EditBufferRenderable,
   type KeyEvent,
+  type Renderable,
   type TextChunk,
   type TextRenderable,
   type TextareaRenderable,
@@ -25,7 +27,8 @@ import { createSignal, onCleanup } from "solid-js"
 
 import { indentFor, pageRows, printable, selectionAfterWrap, wrapSelection, wrapperFor } from "./editor.ts"
 import { btwRequest, formatRequest, transcriptOf } from "./llm.ts"
-import { listPathMatches, noteFileExists, noteKey, readNoteFile, resolveNotePath, writeNoteFile, type PathMatch } from "./note.ts"
+import { listPathMatches, noteFileExists, noteKey, readNoteFile, resolveNotePath, writeNoteFile } from "./note.ts"
+import { applyCompletion, completionQuery, escapeTarget, loadPlan, panelWidth, saveTarget, returnRoute } from "./rules.ts"
 
 const PAGE = "opencode-note"
 
@@ -53,8 +56,6 @@ interface PageState {
   readonly sessionID: string
   readonly created: boolean
   readonly previous: Route
-  /** The chat editor that had focus when the overlay opened, if any. */
-  readonly editor: EditBufferRenderable | null
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -66,11 +67,43 @@ export default Plugin.define({
     // reload cannot carry (renderable identity).
     let page: PageState | undefined
 
+    /** Whether the plugin page is the route the host is showing right now. */
+    const onPage = () => {
+      const current = context.ui.router.current()
+      return current.type === "plugin" && current.name === PAGE
+    }
+
+    /**
+     * The chat input to insert into. The host rebuilds the prompt when the route
+     * changes, so the renderable that had focus when the overlay opened is
+     * usually gone. Prefer whatever holds focus once the session route is back,
+     * and only then fall back to walking the tree for an edit buffer — which is
+     * what makes insertion work in an existing session after a slow re-render.
+     */
+    const findChatInput = (avoid: string): EditBufferRenderable | undefined => {
+      const usable = (node: EditBufferRenderable) => !node.isDestroyed && node.plainText !== avoid
+      const focused = context.renderer.currentFocusedEditor
+      if (focused && usable(focused)) return focused
+      const found: EditBufferRenderable[] = []
+      const walk = (node: Renderable) => {
+        if (node.isDestroyed) return
+        if (isEditBufferRenderable(node) && node.visible && usable(node)) found.push(node)
+        for (const child of node.getChildren?.() ?? []) walk(child)
+      }
+      walk(context.renderer.root)
+      return found[found.length - 1]
+    }
+
     const open = async () => {
       const current = context.ui.router.current()
       if (current.type === "plugin" && current.name === PAGE) return
       const tabs = context.ui.tabs.enabled() ? context.ui.tabs.list() : []
-      let sessionID = tabs.find((tab) => tab.active)?.sessionID ?? (current.type === "session" ? current.sessionID : undefined)
+      const activeTab = tabs.find((tab) => tab.active)?.sessionID
+      // Remember the session, not just the route: a note opened from the home
+      // screen with a tab active still belongs to that tab and must go back to it.
+      const previous: Route =
+        current.type === "session" ? current : activeTab ? { type: "session", sessionID: activeTab } : current
+      let sessionID = activeTab ?? (current.type === "session" ? current.sessionID : undefined)
       let created = false
       if (!sessionID) {
         // A brand-new chat has no session yet. Committing one through the API
@@ -85,8 +118,8 @@ export default Plugin.define({
           return
         }
       }
-      page = { sessionID, created, previous: current, editor: context.renderer.currentFocusedEditor }
-      context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created, previous: current } })
+      page = { sessionID, created, previous }
+      context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created } })
     }
 
     /**
@@ -96,43 +129,45 @@ export default Plugin.define({
     const closePage = (insert?: string) => {
       const state = page
       page = undefined
-      const destination: Route = state?.created
-        ? { type: "session", sessionID: state.sessionID }
-        : (state?.previous ?? { type: "home" })
+      const destination: Route = state
+        ? returnRoute(state)
+        : { type: "home" }
       context.ui.router.navigate(destination)
 
       if (insert !== undefined) {
-        const captured = state?.editor
-        setTimeout(() => {
-          try {
-            // The host rebuilds the prompt when the route changes, so the chat
-            // editor is usually a different renderable than the one captured;
-            // prefer whatever holds focus now and fall back to the captured one.
-            const focused = context.renderer.currentFocusedEditor
-            const target = focused && !focused.isDestroyed ? focused : captured && !captured.isDestroyed ? captured : undefined
-            if (target) {
+        const started = Date.now()
+        const attempt = () => {
+          // Never write into the overlay's own editor: wait until the host has
+          // actually left the plugin route.
+          if (onPage()) {
+            if (Date.now() - started < 2000) setTimeout(attempt, 60)
+            return
+          }
+          const target = findChatInput(insert)
+          if (target) {
+            try {
               context.renderer.focusRenderable(target)
               target.insertText(insert)
               return
+            } catch (error) {
+              console.error("opencode-note: could not insert into the chat input", error)
+              context.ui.toast.show({ title: "Note", message: `Could not insert the note: ${messageOf(error)}`, variant: "error" })
+              return
             }
-            context.renderer.copyToClipboardOSC52(insert)
-            context.ui.toast.show({
-              title: "Note",
-              message: "No chat input was available: the note is on the clipboard instead",
-              variant: "warning",
-            })
-          } catch (error) {
-            console.error("opencode-note: could not insert into the chat input", error)
-            context.ui.toast.show({ title: "Note", message: `Could not insert the note: ${messageOf(error)}`, variant: "error" })
           }
-        }, 150)
+          if (Date.now() - started < 2000) {
+            setTimeout(attempt, 60)
+            return
+          }
+          context.renderer.copyToClipboardOSC52(insert)
+          context.ui.toast.show({
+            title: "Note",
+            message: "No chat input was available: the note is on the clipboard instead",
+            variant: "warning",
+          })
+        }
+        setTimeout(attempt, 40)
       }
-
-      // Safety net: never leave the user trapped on a blank page.
-      setTimeout(() => {
-        const now = context.ui.router.current()
-        if (now.type === "plugin" && now.name === PAGE) context.ui.router.navigate({ type: "home" })
-      }, 400)
     }
 
     const unregister = context.ui.router.register({
@@ -202,7 +237,6 @@ function Note(props: NoteProps) {
   const colors = {
     background: theme.background.base,
     panel: theme.background.raised.base,
-    selectionBackground: theme.background.raised.high,
     border: theme.border.base,
     text: theme.text.base,
     muted: theme.text.muted,
@@ -230,14 +264,14 @@ function Note(props: NoteProps) {
 
   const [_mode, _setMode] = createSignal<"editor" | "buttons">("editor")
   const [_cursor, _setCursor] = createSignal(0)
-  const [_picker, _setPicker] = createSignal<string | null>(null)
+  const [_dialog, _setDialog] = createSignal<{ readonly kind: "save" | "load"; readonly query: string } | null>(null)
   const [_status, _setStatus] = createSignal("")
   const [_busy, _setBusy] = createSignal<{ readonly kind: "format" | "btw"; readonly label: string } | null>(null)
 
   const size = _size
   const mode = _mode
   const cursor = _cursor
-  const picker = _picker
+  const dialog = _dialog
   const status = _status
   const busy = _busy
 
@@ -253,8 +287,8 @@ function Note(props: NoteProps) {
     else _setCursor(value)
     sync()
   }
-  const setPicker = (value: string | null) => {
-    _setPicker(value)
+  const setDialog = (value: { readonly kind: "save" | "load"; readonly query: string } | null) => {
+    _setDialog(value)
     sync()
   }
   const setStatus = (value: string) => {
@@ -307,6 +341,8 @@ function Note(props: NoteProps) {
   // ---- guard against a key being handled twice (keymap layer + renderable) --
   let closeGuard = 0
   let tabGuard = 0
+  /** When the filename dialog last closed: the same Escape must not close the view. */
+  let dialogClosedAt = 0
   const guarded = (slot: "close" | "tab"): boolean => {
     const now = Date.now()
     if (slot === "close") {
@@ -335,6 +371,11 @@ function Note(props: NoteProps) {
   }
 
   const requestClose = () => {
+    if (escapeTarget(dialog() !== null) === "dialog") {
+      closeDialog()
+      return
+    }
+    if (Date.now() - dialogClosedAt < 120) return
     if (guarded("close")) close()
   }
 
@@ -392,18 +433,45 @@ function Note(props: NoteProps) {
     setStatus("Cleared")
   }
 
-  async function saveNote() {
-    const name = await context.ui.dialog.prompt({
-      title: "Save note",
-      description: `Written relative to ${context.ui.format.path(cwd)}`,
-      placeholder: "notes/today.md",
-      value: "NOTE.md",
-    })
-    const target = name?.trim()
-    if (!target) {
-      focusEditor()
-      return
-    }
+  // ---- filename dialog: Save and Load share one implementation ------------
+
+  const dialogQuery = () => dialog()?.query ?? ""
+  const completions = () => (dialog() === null ? [] : listPathMatches(cwd, completionQuery(dialogQuery())))
+
+  function openDialog(kind: "save" | "load") {
+    if (busy()) return
+    setMode("editor")
+    setStatus("")
+    setDialog({ kind, query: "" })
+    // The editor keeps focus so typing still arrives through `onEditorKey`; the
+    // dialog draws over it and swallows the keys it needs.
+    queueMicrotask(() => area?.focus())
+  }
+
+  function closeDialog() {
+    if (dialog() === null) return
+    dialogClosedAt = Date.now()
+    setDialog(null)
+    setStatus("")
+    queueMicrotask(() => area?.focus())
+  }
+
+  function updateDialogQuery(change: (query: string) => string) {
+    const state = dialog()
+    if (!state) return
+    setDialog({ kind: state.kind, query: change(state.query) })
+  }
+
+  /** Tab completion: the first match, which is enough to walk into a directory. */
+  function completeDialog() {
+    const state = dialog()
+    if (!state) return
+    const first = listPathMatches(cwd, completionQuery(state.query))[0]
+    if (!first) return
+    setDialog({ kind: state.kind, query: applyCompletion(state.query, first.label) })
+  }
+
+  function saveTo(target: string) {
     try {
       const path = writeNoteFile(resolveNotePath(cwd, target), currentText())
       setStatus(`Saved ${context.ui.format.path(path)}`)
@@ -412,57 +480,44 @@ function Note(props: NoteProps) {
       setStatus(`Could not save: ${messageOf(error)}`)
       context.ui.toast.show({ title: "Note", message: `Could not save: ${messageOf(error)}`, variant: "error" })
     }
-    focusEditor()
   }
-
-  function startPicker() {
-    setMode("editor")
-    setStatus("")
-    setPicker("")
-    queueMicrotask(() => area?.focus())
-  }
-
-  const matches = () => (picker() === null ? [] : listPathMatches(cwd, picker() ?? ""))
 
   function loadFile(path: string) {
     try {
-      applyText(readNoteFile(path))
-      setPicker(null)
+      const text = readNoteFile(path)
+      closeDialog()
+      applyText(text)
       setStatus(`Loaded ${context.ui.format.path(path)}`)
     } catch {
       setStatus(`Cannot read ${context.ui.format.path(path)}`)
     }
   }
 
-  function pickMatch(match: PathMatch) {
-    if (match.directory) {
-      setPicker(match.label)
-      return
-    }
-    loadFile(match.path)
+  function commitSave(query: string) {
+    closeDialog()
+    saveTo(saveTarget(query))
   }
 
-  function commitPicker() {
-    const query = (picker() ?? "").trim()
-    if (!query) {
-      if (noteFileExists(cwd, "NOTE.md")) {
-        loadFile(resolveNotePath(cwd, "NOTE.md"))
-        return
-      }
-      const first = matches()[0]
-      if (first) {
-        pickMatch(first)
-        return
-      }
+  function commitLoad(query: string) {
+    const plan = loadPlan(cwd, query)
+    if (plan.kind === "browse") {
+      setDialog({ kind: "load", query: plan.query })
+      return
+    }
+    if (plan.kind === "nothing") {
+      // Keep the dialog open: a path can still be typed.
       setStatus("Nothing to load: no NOTE.md in this directory")
       return
     }
-    const first = matches()[0]
-    if (first?.directory) {
-      setPicker(first.label)
-      return
-    }
-    loadFile(first?.path ?? resolveNotePath(cwd, query))
+    // Enter commits: opening the file closes the dialog.
+    loadFile(plan.path)
+  }
+
+  function commitDialog() {
+    const state = dialog()
+    if (!state) return
+    if (state.kind === "save") commitSave(state.query)
+    else commitLoad(state.query)
   }
 
   const modelRef = () => {
@@ -550,8 +605,8 @@ function Note(props: NoteProps) {
     const actions: Record<ButtonKey, () => void> = {
       i: insert,
       c: clearNote,
-      s: () => void saveNote(),
-      l: startPicker,
+      s: () => openDialog("save"),
+      l: () => openDialog("load"),
       f: formatNote,
       b: askBtw,
     }
@@ -567,32 +622,47 @@ function Note(props: NoteProps) {
 
   // ---- keyboard ------------------------------------------------------------
 
+  const onDialogKey = (key: KeyEvent) => {
+    const typed = printable(key)
+    if (typed !== undefined) {
+      key.preventDefault()
+      updateDialogQuery((query) => query + typed)
+      return
+    }
+    if (key.name === "backspace") {
+      key.preventDefault()
+      updateDialogQuery((query) => query.slice(0, -1))
+      return
+    }
+    if (key.name === "return" || key.name === "kpenter" || key.name === "enter") {
+      key.preventDefault()
+      commitDialog()
+      return
+    }
+    if (key.name === "tab") {
+      key.preventDefault()
+      completeDialog()
+      return
+    }
+    if (key.name === "escape") {
+      key.preventDefault()
+      closeDialog()
+    }
+  }
+
   const onEditorKey = (key: KeyEvent) => {
     if (busy()) return
-    if (picker() !== null) {
-      // The picker owns the keyboard while it is open; the textarea is not fed.
-      const typed = printable(key)
-      if (typed !== undefined) {
-        key.preventDefault()
-        setPicker(`${picker() ?? ""}${typed}`)
-        return
-      }
-      if (key.name === "backspace") {
-        key.preventDefault()
-        setPicker((picker() ?? "").slice(0, -1))
-        return
-      }
-      if (key.name === "return" || key.name === "kpenter") {
-        key.preventDefault()
-        commitPicker()
-        return
-      }
-      if (key.name === "escape") {
-        key.preventDefault()
-        setPicker(null)
-        setStatus("")
-      }
+    if (dialog() !== null) {
+      // The dialog owns the keyboard while it is open; the textarea is not fed.
+      onDialogKey(key)
       return
+    }
+    if (Date.now() - dialogClosedAt < 120) {
+      // The same keypress that settled the dialog must not reach the editor.
+      if (key.name === "return" || key.name === "kpenter" || key.name === "enter" || key.name === "tab") {
+        key.preventDefault()
+        return
+      }
     }
 
     if (key.name === "escape") {
@@ -606,10 +676,10 @@ function Note(props: NoteProps) {
       if (guarded("tab")) focusButtons()
       return
     }
-    if (key.name === "return" && key.ctrl) {
+    if (key.name === "return" || key.name === "kpenter" || key.name === "enter") {
       key.preventDefault()
       area?.newLine()
-      if (indent) area?.insertText(indent)
+      if (key.ctrl && indent) area?.insertText(indent)
       persist()
       return
     }
@@ -637,7 +707,7 @@ function Note(props: NoteProps) {
   context.keymap.layer(() => ({
     mode: "global",
     priority: 110,
-    enabled: () => mode() === "editor" && !busy(),
+    enabled: () => mode() === "editor" && !busy() && dialog() === null,
     commands: [
       { id: "opencode-note.editor.escape", bind: "escape", run: () => requestClose() },
       { id: "opencode-note.editor.buttons", bind: "tab", run: () => { if (guarded("tab")) focusButtons() } },
@@ -647,7 +717,7 @@ function Note(props: NoteProps) {
   context.keymap.layer(() => ({
     mode: "global",
     priority: 120,
-    enabled: () => mode() === "buttons" && !busy(),
+    enabled: () => mode() === "buttons" && !busy() && dialog() === null,
     commands: [
       { id: "opencode-note.buttons.editor", bind: "tab", run: () => { if (guarded("tab")) focusEditor() } },
       {
@@ -677,6 +747,19 @@ function Note(props: NoteProps) {
     commands: [{ id: "opencode-note.busy.cancel", bind: "escape", run: () => cancelWork() }],
   }))
 
+  // The filename dialog wins over every page binding: its Escape closes the
+  // dialog, never the view, and Enter commits instead of adding a newline.
+  context.keymap.layer(() => ({
+    mode: "global",
+    priority: 140,
+    enabled: () => dialog() !== null && !busy(),
+    commands: [
+      { id: "opencode-note.dialog.escape", bind: "escape", run: () => closeDialog() },
+      { id: "opencode-note.dialog.commit", bind: "return,enter", run: () => commitDialog() },
+      { id: "opencode-note.dialog.complete", bind: "tab", run: () => completeDialog() },
+    ],
+  }))
+
   // ---- rendering -----------------------------------------------------------
   //
   // OpenCode loads this file with a plain JSX transform, so a reconciled prop is
@@ -684,7 +767,7 @@ function Note(props: NoteProps) {
   // page that changes while it is open is therefore written onto its renderable
   // from an effect below, which is also how the host's own views stay live.
 
-  const innerWidth = () => Math.max(24, Math.floor(size().width * 0.7))
+  const innerWidth = () => panelWidth(size().width)
   const innerHeight = () => Math.max(8, Math.floor(size().height * 0.7))
 
   const header = () => {
@@ -693,10 +776,10 @@ function Note(props: NoteProps) {
   }
 
   const hints = () => {
-    if (picker() !== null) {
-      return noteFileExists(cwd, "NOTE.md")
-        ? "Load: Enter opens NOTE.md · type to autocomplete · Esc cancels"
-        : "Load: type a path · Enter opens the first match · Esc cancels"
+    if (dialog() !== null) {
+      return dialog()?.kind === "load"
+        ? "Load: Enter opens · Tab completes · typing filters · Esc cancels"
+        : "Save: Enter writes · Tab completes · typing filters · Esc cancels"
     }
     if (mode() === "buttons") return "Tab to edit · ←→ select · Enter or Space presses · Esc closes"
     return "Tab for commands · Esc closes · Ctrl+Enter newline and indent · Ctrl+C copies"
@@ -706,9 +789,11 @@ function Note(props: NoteProps) {
   let panelBox: BoxRenderable | undefined
   let buttonBar: TextRenderable | undefined
   let hintLine: TextRenderable | undefined
-  let pickerBox: BoxRenderable | undefined
-  let pickerInput: TextRenderable | undefined
-  let pickerHint: TextRenderable | undefined
+  let dialogBox: BoxRenderable | undefined
+  let dialogTitle: TextRenderable | undefined
+  let dialogDirectory: TextRenderable | undefined
+  let dialogInput: TextRenderable | undefined
+  let dialogHint: TextRenderable | undefined
   const matchRows: Array<TextRenderable | undefined> = []
   let busyBox: BoxRenderable | undefined
   let busyLine: TextRenderable | undefined
@@ -756,17 +841,33 @@ function Note(props: NoteProps) {
     hintLine.fg = status() ? colors.accent : colors.faint
   }
 
-  const syncPicker = () => {
-    if (!pickerBox) return
-    pickerBox.visible = picker() !== null
-    if (picker() === null) return
-    if (pickerInput) pickerInput.content = styled([{ text: "> ", fg: colors.accent }, { text: picker() ?? "", fg: colors.text }])
-    const named = picker() === "" && noteFileExists(cwd, "NOTE.md")
-    if (pickerHint) {
-      pickerHint.visible = named
-      pickerHint.content = "  NOTE.md  (Enter opens it)"
+  const dialogWidth = () =>
+    Math.max(1, Math.min(Math.max(1, innerWidth() - 2), Math.max(40, Math.floor(size().width * 0.6))))
+  const DIALOG_HEIGHT = 9
+
+  const syncDialog = () => {
+    const state = dialog()
+    if (!dialogBox) return
+    dialogBox.visible = state !== null
+    if (!state) return
+    const width = dialogWidth()
+    dialogBox.width = width
+    dialogBox.height = DIALOG_HEIGHT
+    dialogBox.top = Math.max(0, Math.floor((size().height - DIALOG_HEIGHT) / 2))
+    dialogBox.left = Math.max(0, Math.floor((size().width - width) / 2))
+    if (dialogTitle) dialogTitle.content = state.kind === "save" ? "Save note to a file" : "Load a file into the note"
+    if (dialogDirectory) dialogDirectory.content = `relative to ${context.ui.format.path(cwd)}`
+    if (dialogInput) {
+      dialogInput.content = state.query
+        ? styled([{ text: "> ", fg: colors.accent }, { text: state.query, fg: colors.text }])
+        : styled([{ text: "> ", fg: colors.accent }, { text: "NOTE.md", fg: colors.faint }])
     }
-    const rows = matches().slice(0, matchRows.length)
+    if (dialogHint) {
+      const named = completionQuery(state.query) === "" && noteFileExists(cwd, "NOTE.md")
+      dialogHint.visible = state.kind === "load" && named
+      dialogHint.content = "  NOTE.md  (Enter opens it)"
+    }
+    const rows = completions().slice(0, matchRows.length)
     matchRows.forEach((row, index) => {
       if (!row) return
       const match = rows[index]
@@ -787,7 +888,7 @@ function Note(props: NoteProps) {
     syncSize()
     syncButtons()
     syncHint()
-    syncPicker()
+    syncDialog()
     syncBusy()
   }
 
@@ -836,46 +937,10 @@ function Note(props: NoteProps) {
           textColor={colors.text}
           focusedTextColor={colors.text}
           cursorColor={colors.accent}
-          selectionBg={colors.selectionBackground}
-          selectionFg={colors.text}
           placeholder="Write anything. It stays here, out of the chat."
           onContentChange={() => persist()}
           onKeyDown={onEditorKey}
         />
-        <box
-          ref={(node: BoxRenderable) => {
-            pickerBox = node
-          }}
-          flexDirection="column"
-          visible={false}
-        >
-          <text
-            ref={(node: TextRenderable) => {
-              pickerInput = node
-            }}
-            wrapMode="none"
-            content=">"
-          />
-          <text
-            ref={(node: TextRenderable) => {
-              pickerHint = node
-            }}
-            wrapMode="none"
-            content="  NOTE.md  (Enter opens it)"
-            fg={colors.faint}
-            visible={false}
-          />
-          {[0, 1, 2, 3].map((index) => (
-            <text
-              ref={(node: TextRenderable) => {
-                matchRows[index] = node
-              }}
-              wrapMode="none"
-              content=" "
-              visible={false}
-            />
-          ))}
-        </box>
         <text
           ref={(node: TextRenderable) => {
             buttonBar = node
@@ -891,6 +956,67 @@ function Note(props: NoteProps) {
           content={hints()}
           fg={colors.faint}
         />
+      </box>
+      <box
+        ref={(node: BoxRenderable) => {
+          dialogBox = node
+        }}
+        position="absolute"
+        top={0}
+        left={0}
+        width={40}
+        height={DIALOG_HEIGHT}
+        border
+        borderStyle="rounded"
+        borderColor={colors.accent}
+        backgroundColor={colors.panel}
+        flexDirection="column"
+        paddingLeft={1}
+        paddingRight={1}
+        visible={false}
+      >
+        <text
+          ref={(node: TextRenderable) => {
+            dialogTitle = node
+          }}
+          wrapMode="none"
+          content="Save note to a file"
+          fg={colors.accent}
+        />
+        <text
+          ref={(node: TextRenderable) => {
+            dialogDirectory = node
+          }}
+          wrapMode="none"
+          content=""
+          fg={colors.muted}
+        />
+        <text
+          ref={(node: TextRenderable) => {
+            dialogInput = node
+          }}
+          wrapMode="none"
+          content=""
+        />
+        <text
+          ref={(node: TextRenderable) => {
+            dialogHint = node
+          }}
+          wrapMode="none"
+          content=""
+          fg={colors.faint}
+          visible={false}
+        />
+        {[0, 1, 2, 3, 4].map((index) => (
+          <text
+            ref={(node: TextRenderable) => {
+              matchRows[index] = node
+            }}
+            wrapMode="none"
+            content=" "
+            visible={false}
+          />
+        ))}
       </box>
       <box
         ref={(node: BoxRenderable) => {

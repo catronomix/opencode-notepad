@@ -48,7 +48,7 @@ TUI to pick it up.
 | key                                       | action                                              |
 | ----------------------------------------- | --------------------------------------------------- |
 | <kbd>/note</kbd>, palette “Note”           | open the scratchpad for the current chat            |
-| <kbd>Esc</kbd>                             | close the scratchpad, or cancel a running call      |
+| <kbd>Esc</kbd>                             | close the filename dialog, else the scratchpad; cancels a running call |
 | <kbd>Tab</kbd>                             | move focus between the editor and the button bar    |
 | <kbd>Return</kbd>                          | newline                                             |
 | <kbd>Ctrl</kbd>+<kbd>Return</kbd>          | newline and indent                                  |
@@ -83,10 +83,14 @@ the client API and inlines them into the prompt instead.
 ## Notes and limits
 
 - The scratchpad is a plugin route: a full-screen page with a centred panel at
-  70% width and height. The TUI plugin API has no floating layer above the chat,
-  so the chat is hidden while the note is open.
-- `Insert` writes into the chat input that has focus after the page closes. When
-  no editor is available it copies the text with OSC 52 and shows a toast.
+  70% width and height, at least 80 columns wide and never wider than the
+  terminal. The TUI plugin API has no floating layer above the chat, so the chat
+  is hidden while the note is open.
+- `Insert` waits for the chat route to come back, then writes into the prompt's
+  edit buffer. When no editor is available it copies the text with OSC 52 and
+  shows a toast.
+- Closing returns to the session the note was opened from, or home when there was
+  no session yet. Escape closes the filename dialog first and the note second.
 - A brand-new chat has no session yet; opening the note commits one through the
   API (no prompt, no model call) so the note has somewhere stable to live.
 - Deleting a chat deletes its note.
