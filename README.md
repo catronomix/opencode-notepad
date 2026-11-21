@@ -48,11 +48,11 @@ TUI to pick it up.
 | key                                       | action                                              |
 | ----------------------------------------- | --------------------------------------------------- |
 | <kbd>/note</kbd>, palette “Note”           | open the scratchpad for the current chat            |
-| <kbd>Esc</kbd>                             | close the filename dialog, else the scratchpad; cancels a running call |
+| <kbd>Esc</kbd>                             | close the filename dialog, else the scratchpad in one press; cancels a running call |
 | <kbd>Tab</kbd>                             | move focus between the editor and the button bar    |
 | <kbd>Return</kbd>                          | newline (the page takes it back from the host's `input.submit` binding) |
 | <kbd>Ctrl</kbd>+<kbd>Return</kbd>          | newline and indent                                  |
-| <kbd>Home</kbd> / <kbd>End</kbd>           | start / end of the line                             |
+| <kbd>Home</kbd> / <kbd>End</kbd>           | start / end of the current line (<kbd>Shift</kbd> selects to it) |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd>          | a screen up / down (<kbd>Shift</kbd> selects)       |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd>               | copy the selection                                  |
 | <kbd>←</kbd> <kbd>→</kbd> in the bar       | pick a button                                       |
@@ -70,7 +70,7 @@ The bracketed letter is the shortcut — pressing it presses the button.
 | ---------- | ------------------------------------------------------------------------- |
 | `[i]nsert` | put the note (or the selected fragment) into the chat input and close      |
 | `[c]lear`  | empty the note                                                             |
-| `[s]ave`   | prompt for a file name (default `NOTE.md`) and write it to the project     |
+| `[s]ave`   | prompt for a file name (default `NOTE.md`) and write it in the chat's working directory |
 | `[l]oad`   | `@./`-style path completion; <kbd>Return</kbd> opens the first match       |
 | `[f]ormat` | rewrite the note with the current model                                    |
 | `[b]tw`    | answer the note as a side question, with the chat as context, and append   |
@@ -90,10 +90,15 @@ the client API and inlines them into the prompt instead.
   writes into that edit buffer; the note stays there for the next message. When
   no prompt is found the page says so in a toast and inserts nothing — it never
   pastes into another buffer and never opens a different session.
-- Closing returns to the exact screen the note was opened over, so the host
-  reuses that route and its tab; home only when the page had to start a session.
-  Escape closes the filename dialog first and the note second.
-- `[s]ave` and `[l]oad` share one dialog: same box, same title/hint rows, and no
+- Closing returns to the exact screen the note was opened over — the route
+  snapshot the host's own full-screen pages keep — so no new tab is opened and
+  the chat is not re-resolved. One <kbd>Esc</kbd> closes the filename dialog and
+  the next closes the note; a press that settles the dialog never also leaves.
+- `[s]ave` and `[l]oad` resolve paths against the current chat's working
+  directory (the session's `location.directory`, falling back to the project
+  directory), never against the directory the TUI was launched in. The dialog
+  shows the resolved directory. Default save name is exactly `NOTE.md`.
+- Both share one dialog: same box, same title/hint rows, and no
   path completions until something has been typed. While the dialog is open it
   owns the keyboard — the note's textarea is blurred and not focusable.
 - A brand-new chat has no session yet; opening the note commits one through the

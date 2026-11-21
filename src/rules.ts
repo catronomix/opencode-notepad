@@ -10,12 +10,19 @@ import type { Route } from "@opencode/plugin/tui/context"
 import { listPathMatches, noteFileExists, resolveNotePath, type PathMatch } from "./note.ts"
 
 /**
- * The path the save dialog writes to. An empty or blank answer means `NOTE.md`;
- * `name === undefined` (the dialog was cancelled) is handled by the caller and
- * never reaches this function.
+ * The file an empty save dialog writes, and the file an empty load dialog
+ * opens. One constant, so the placeholder, the written name and the fallback
+ * can never drift apart in case.
+ */
+export const DEFAULT_NOTE_FILE = "NOTE.md"
+
+/**
+ * The path the save dialog writes to. An empty or blank answer means
+ * `NOTE.md`; `name === undefined` (the dialog was cancelled) is handled by the
+ * caller and never reaches this function.
  */
 export function saveTarget(query: string): string {
-  return query.trim() || "NOTE.md"
+  return query.trim() || DEFAULT_NOTE_FILE
 }
 
 /** `@./`-style queries are accepted: a leading `@` decorates, it is not a path. */
@@ -57,16 +64,17 @@ export function panelWidth(windowWidth: number): number {
 }
 
 /**
- * Where closing the note returns to: the route the page was opened over, kept
- * verbatim so the host reuses that screen and its tab instead of resolving a
- * new one. Only a session this page had to create has no captured route.
+ * Where closing the note returns to: the route snapshot taken when the page
+ * opened, handed back verbatim.
+ *
+ * The host has no route history: `ui.router` exposes only
+ * `register/navigate/current`, and `Route.navigate` sets a single route signal.
+ * The built-in full-screen pages therefore snapshot the route they were opened
+ * over and navigate to that snapshot when they close — `opencode.stats` keeps
+ * `let[n,r]=W({...t.ui.router.current()})` and closes with
+ * `t.ui.router.navigate(n())` — instead of resolving a session.
  */
-export function returnRoute(state: {
-  readonly created: boolean
-  readonly sessionID: string
-  readonly previous: Route
-}): Route {
-  if (state.created) return { type: "session", sessionID: state.sessionID }
+export function returnRoute(state: { readonly previous: Route }): Route {
   return state.previous
 }
 
@@ -107,7 +115,7 @@ export function dialogSpec(kind: "save" | "load"): DialogSpec {
   return {
     title: kind === "save" ? "Save note to a file" : "Load a file into the note",
     hint: kind === "save" ? "Enter writes · Tab completes · Esc cancels" : "Enter opens · Tab completes · Esc cancels",
-    placeholder: "NOTE.md",
+    placeholder: DEFAULT_NOTE_FILE,
   }
 }
 
@@ -207,7 +215,7 @@ export function dialogKey(state: DialogState, key: DialogKey): DialogResult {
 export function loadPlan(cwd: string, query: string): LoadPlan {
   const normalized = completionQuery(query).trim()
   if (!normalized) {
-    if (noteFileExists(cwd, "NOTE.md")) return { kind: "open", path: resolveNotePath(cwd, "NOTE.md") }
+    if (noteFileExists(cwd, DEFAULT_NOTE_FILE)) return { kind: "open", path: resolveNotePath(cwd, DEFAULT_NOTE_FILE) }
     const first = listPathMatches(cwd, "")[0]
     if (!first) return { kind: "nothing" }
     return first.directory ? { kind: "browse", query: first.label } : { kind: "open", path: first.path }

@@ -73,6 +73,8 @@ interface PageState {
   readonly sessionID: string
   readonly created: boolean
   readonly previous: Route
+  /** The session's own working directory: files resolve against it, never `process.cwd()`. */
+  readonly directory: string
 }
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -117,27 +119,38 @@ export default Plugin.define({
       const tabs = context.ui.tabs.enabled() ? context.ui.tabs.list() : []
       const activeTab = tabs.find((tab) => tab.active)?.sessionID
       // The page remembers the route object it was opened over and hands it
-      // back verbatim on close, so the host reuses that screen and its tab.
-      // The note itself still belongs to the active chat, which on the home
-      // screen is only known from the tab bar.
+      // back verbatim on close, so the host reuses that screen. The note itself
+      // still belongs to the active chat, which on the home screen is only
+      // known from the tab bar.
       const previous: Route = current
       let sessionID = activeTab ?? (current.type === "session" ? current.sessionID : undefined)
       let created = false
+      // Files resolve against the chat's own working directory, never against
+      // `process.cwd()` (which is only the directory the TUI was launched in).
+      // The host publishes that directory as a `LocationRef`: the session record
+      // carries it per chat, `context.location` for the screen being shown, and
+      // `data.location.default()` for the project. Read, in that order.
+      const projectDirectory = () => context.location?.directory ?? context.data.location.default().directory
+      let directory = sessionID
+        ? (context.data.session.get(sessionID)?.location.directory ?? projectDirectory())
+        : projectDirectory()
       if (!sessionID) {
         // A brand-new chat has no session yet. Committing one through the API
-        // (no prompt, no model call) is what gives the note a stable home.
+        // (no prompt, no model call) is what gives the note a stable home. Its
+        // tab is deliberately not focused and it is never navigated to on close:
+        // the page is opened over whatever the user was looking at.
         try {
-          const session = await context.client.session.create({})
+          const session = await context.client.session.create({ location: { directory } })
           sessionID = session.id
           created = true
-          if (context.ui.tabs.enabled()) context.ui.tabs.focus(sessionID)
+          directory = session.location.directory || directory
         } catch (error) {
           context.ui.toast.show({ title: "Note", message: `Could not start a session: ${messageOf(error)}`, variant: "error" })
           return
         }
       }
-      page = { sessionID, created, previous }
-      context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created } })
+      page = { sessionID, created, previous, directory }
+      context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created, directory } })
     }
 
     /**
@@ -148,6 +161,11 @@ export default Plugin.define({
     const closePage = (insert?: string) => {
       const state = page
       page = undefined
+      // Closing hands back the route snapshot the page was opened over, exactly
+      // the way the host's own `opencode.stats` page closes: it keeps
+      // `{...router.current()}` and calls `router.navigate(snapshot)`. It never
+      // navigates to a session of its own, because the host's tab store opens a
+      // tab for every session route that becomes current.
       context.ui.router.navigate(state ? (insert === undefined ? returnRoute(state) : insertRoute(state)) : { type: "home" })
 
       if (insert !== undefined) {
@@ -192,6 +210,7 @@ export default Plugin.define({
       render: ({ data }) => {
         const sessionID = typeof data?.sessionID === "string" ? data.sessionID : undefined
         const created = data?.created === true
+        const directory = typeof data?.directory === "string" ? data.directory : ""
         if (!sessionID) {
           page = undefined
           return (
@@ -200,7 +219,7 @@ export default Plugin.define({
             </box>
           )
         }
-        return <Note context={context} sessionID={sessionID} created={created} close={closePage} />
+        return <Note context={context} sessionID={sessionID} created={created} directory={directory} close={closePage} />
       },
     })
 
@@ -245,6 +264,8 @@ interface NoteProps {
   readonly context: Context
   readonly sessionID: string
   readonly created: boolean
+  /** The chat's working directory, resolved by the host when the page opened. */
+  readonly directory: string
   readonly close: (insert?: string) => void
 }
 
@@ -324,7 +345,9 @@ function Note(props: NoteProps) {
   let abort: AbortController | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
 
-  const cwd = process.cwd()
+  // The chat's working directory, captured when the page opened. Save and Load
+  // resolve against this, never against the TUI process's cwd.
+  const directory = props.directory || context.location?.directory || context.data.location.default().directory
 
   /** Current note text: the buffer once it exists, the store before that. */
   const currentText = () => area?.plainText ?? latest
@@ -358,29 +381,31 @@ function Note(props: NoteProps) {
   }
 
   // ---- guard against a key being handled twice (keymap layer + renderable) --
-  let closeGuard = 0
   let tabGuard = 0
-  /** When the filename dialog last closed: the same Escape must not close the view. */
-  let dialogClosedAt = 0
   /**
    * One physical Enter reaches the page twice: once through the keymap (where
    * the page claims `return`) and once through the textarea's own key handler.
    * A short window keeps it a single newline without swallowing a second press.
    */
   let newlineGuard = 0
+  /** Set once the view has decided to leave, so a second delivery is ignored. */
+  let closing = false
+  /**
+   * When the dialog settled the last key. Only that one press is suppressed
+   * elsewhere: the dialog's Enter must not also insert a newline, and the
+   * dialog's Escape must not also close the view (dialog first). Nothing else
+   * uses this window, so a plain Escape is never swallowed.
+   */
+  let dialogSettledAt = 0
+  const dialogSettled = (): boolean => Date.now() - dialogSettledAt < 60
   const guardedNewline = (): boolean => {
     const now = Date.now()
     if (now - newlineGuard < 30) return false
     newlineGuard = now
     return true
   }
-  const guarded = (slot: "close" | "tab"): boolean => {
+  const guardedTab = (): boolean => {
     const now = Date.now()
-    if (slot === "close") {
-      if (now - closeGuard < 60) return false
-      closeGuard = now
-      return true
-    }
     if (now - tabGuard < 60) return false
     tabGuard = now
     return true
@@ -401,13 +426,44 @@ function Note(props: NoteProps) {
     props.close()
   }
 
+  /**
+   * Escape is layered and one-shot: while the dialog is open it closes only the
+   * dialog; otherwise a single Escape closes the view. `closing` absorbs the
+   * second delivery of the same press (the textarea path and the keymap layer
+   * both see it), and `dialogSettled()` absorbs the press the dialog already
+   * used.
+   */
   const requestClose = () => {
+    if (closing) return
     if (escapeTarget(dialog() !== null) === "dialog") {
       closeDialog()
       return
     }
-    if (Date.now() - dialogClosedAt < 120) return
-    if (guarded("close")) close()
+    if (dialogSettled()) return
+    closing = true
+    close()
+  }
+
+  /**
+   * Home/End are line-scoped here. OpenTUI's buffer edges (`gotoBufferHome`)
+   * and the host's `input.select.buffer.*` bindings are deliberately bypassed:
+   * the textarea's own key map points Home/End at `line-home`/`line-end`, and
+   * this handler (plus the page's keymap layer) covers the shifted variants the
+   * host binds before the textarea ever sees them.
+   *
+   * One physical key arrives on both routes (renderable listener and keymap
+   * layer). Repeating the move with `select` would move the anchor onto the old
+   * cursor and collapse the very selection it just made, so only the first
+   * delivery counts.
+   */
+  let edgeGuard = 0
+  const moveLineEdge = (edge: "home" | "end", select: boolean) => {
+    if (!area) return
+    const now = Date.now()
+    if (now - edgeGuard < 30) return
+    edgeGuard = now
+    if (edge === "home") area.gotoLineHome({ select })
+    else area.gotoLineEnd({ select })
   }
 
   const movePage = (direction: number, select: boolean) => {
@@ -472,7 +528,7 @@ function Note(props: NoteProps) {
   // Nothing a key does can reach the note behind it.
 
   const dialogQuery = () => dialogValue().text
-  const completions = () => (dialog() === null ? [] : dialogMatches(cwd, dialogQuery()))
+  const completions = () => (dialog() === null ? [] : dialogMatches(directory, dialogQuery()))
 
   const setDialogValue = (state: DialogState) => {
     _setDialogText(state)
@@ -497,19 +553,21 @@ function Note(props: NoteProps) {
 
   function closeDialog() {
     if (dialog() === null) return
-    dialogClosedAt = Date.now()
     setDialog(null)
     setStatus("")
     queueMicrotask(() => {
       if (area) area.focusable = true
-      area?.focus()
+      // Focus and the page's mode must move together: the mode signal is what
+      // enables the editor's keymap layer, and a mode that disagrees with the
+      // real focus leaves keys (Escape included) unclaimed.
+      focusEditor()
     })
   }
 
   /** Tab completion: the first match, which is enough to walk into a directory. */
   function completeDialog() {
     if (!dialog()) return
-    const first = listPathMatches(cwd, completionQuery(dialogQuery()))[0]
+    const first = listPathMatches(directory, completionQuery(dialogQuery()))[0]
     if (!first) return
     const completed = applyCompletion(dialogQuery(), first.label)
     setDialogValue({ text: completed, caret: completed.length })
@@ -517,7 +575,7 @@ function Note(props: NoteProps) {
 
   function saveTo(target: string) {
     try {
-      const path = writeNoteFile(resolveNotePath(cwd, target), currentText())
+      const path = writeNoteFile(resolveNotePath(directory, target), currentText())
       setStatus(`Saved ${context.ui.format.path(path)}`)
       context.ui.toast.show({ title: "Note", message: `Saved ${context.ui.format.path(path)}`, variant: "success" })
     } catch (error) {
@@ -543,7 +601,7 @@ function Note(props: NoteProps) {
   }
 
   function commitLoad(query: string) {
-    const plan = loadPlan(cwd, query)
+    const plan = loadPlan(directory, query)
     if (plan.kind === "browse") {
       setDialogValue({ text: plan.query, caret: plan.query.length })
       return
@@ -695,6 +753,7 @@ function Note(props: NoteProps) {
       return
     }
     if (result.type === "cancel") {
+      dialogSettledAt = Date.now()
       closeDialog()
       return
     }
@@ -702,6 +761,7 @@ function Note(props: NoteProps) {
       completeDialog()
       return
     }
+    dialogSettledAt = Date.now()
     commitDialog()
   }
 
@@ -712,14 +772,17 @@ function Note(props: NoteProps) {
       key.preventDefault()
       return
     }
-    if (Date.now() - dialogClosedAt < 120) {
-      // The same keypress that settled the dialog must not reach the editor.
-      if (key.name === "return" || key.name === "kpenter" || key.name === "enter" || key.name === "tab") {
-        key.preventDefault()
-        return
-      }
+    if (dialogSettled() && (key.name === "return" || key.name === "kpenter" || key.name === "enter" || key.name === "tab")) {
+      // The same press that settled the dialog must not reach the note.
+      key.preventDefault()
+      return
     }
 
+    if (key.name === "home" || key.name === "end") {
+      key.preventDefault()
+      moveLineEdge(key.name, key.shift === true)
+      return
+    }
     if (key.name === "escape") {
       key.preventDefault()
       requestClose()
@@ -728,7 +791,7 @@ function Note(props: NoteProps) {
     if (key.name === "tab") {
       key.preventDefault()
       if (key.shift) return
-      if (guarded("tab")) focusButtons()
+      if (guardedTab()) focusButtons()
       return
     }
     if (key.name === "return" || key.name === "kpenter" || key.name === "enter") {
@@ -758,6 +821,19 @@ function Note(props: NoteProps) {
     if (typed !== undefined && wrapTyped(typed)) key.preventDefault()
   }
 
+  // Escape is claimed regardless of the page's own focus bookkeeping. The
+  // per-mode layers below are only live while `mode()` matches the textarea or
+  // the button bar, and a mode that has drifted from the real focus makes the
+  // first Escape a no-op: no layer is enabled, and the renderable path never
+  // runs because focus is not in the note's textarea. This layer has no such
+  // condition (only `busy()`), so one press always settles the view.
+  context.keymap.layer(() => ({
+    mode: "global",
+    priority: 1000,
+    enabled: () => !busy(),
+    commands: [{ id: "opencode-note.escape", bind: "escape", run: () => requestClose() }],
+  }))
+
   // Which layer is live follows the focus: the textarea handles the editor, the
   // keymap handles the button bar and the running model call. The filename
   // dialog is not here at all: it takes focus and handles its own keys.
@@ -766,8 +842,15 @@ function Note(props: NoteProps) {
     priority: 110,
     enabled: () => mode() === "editor" && !busy() && dialog() === null,
     commands: [
-      { id: "opencode-note.editor.escape", bind: "escape", run: () => requestClose() },
-      { id: "opencode-note.editor.buttons", bind: "tab", run: () => { if (guarded("tab")) focusButtons() } },
+      { id: "opencode-note.editor.buttons", bind: "tab", run: () => { if (guardedTab()) focusButtons() } },
+      // Home/End stay on the current line. The plain keys reach the textarea's
+      // own key map; the shifted ones are claimed by the host's
+      // `input.select.buffer.home`/`end` bindings first, so they are reclaimed
+      // here at a higher priority and forwarded to the textarea's line methods.
+      { id: "opencode-note.editor.line-home", bind: "home", run: () => moveLineEdge("home", false) },
+      { id: "opencode-note.editor.line-end", bind: "end", run: () => moveLineEdge("end", false) },
+      { id: "opencode-note.editor.select-line-home", bind: "shift+home", run: () => moveLineEdge("home", true) },
+      { id: "opencode-note.editor.select-line-end", bind: "shift+end", run: () => moveLineEdge("end", true) },
       // Enter belongs to the note, but OpenCode binds a bare `return` to
       // `input.submit` for the focused editor and consumes it before the
       // textarea sees it. Claiming it here (higher priority) restores the
@@ -781,7 +864,7 @@ function Note(props: NoteProps) {
     priority: 120,
     enabled: () => mode() === "buttons" && !busy() && dialog() === null,
     commands: [
-      { id: "opencode-note.buttons.editor", bind: "tab", run: () => { if (guarded("tab")) focusEditor() } },
+      { id: "opencode-note.buttons.editor", bind: "tab", run: () => { if (guardedTab()) focusEditor() } },
       {
         id: "opencode-note.buttons.prev",
         bind: "left,up,shift+tab",
@@ -793,7 +876,6 @@ function Note(props: NoteProps) {
         run: () => setCursor((index) => (index + 1) % BUTTONS.length),
       },
       { id: "opencode-note.buttons.press", bind: "return,enter,space", run: () => pressButton(cursor()) },
-      { id: "opencode-note.buttons.escape", bind: "escape", run: () => requestClose() },
       ...BUTTONS.map((button) => ({
         id: `opencode-note.buttons.${button.key}`,
         bind: button.key,
@@ -905,7 +987,7 @@ function Note(props: NoteProps) {
     dialogBox.top = Math.max(0, Math.floor((size().height - DIALOG_HEIGHT) / 2))
     dialogBox.left = Math.max(0, Math.floor((size().width - width) / 2))
     if (dialogTitle) dialogTitle.content = spec.title
-    if (dialogDirectory) dialogDirectory.content = `relative to ${context.ui.format.path(cwd)}`
+    if (dialogDirectory) dialogDirectory.content = context.ui.format.path(directory)
     const value = dialogValue().text
     if (dialogInput) {
       dialogInput.content = value

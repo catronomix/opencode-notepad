@@ -45,16 +45,17 @@ export function wrapSelection(open: string, selected: string, close: string): st
 }
 
 /**
- * Selection to restore after wrapping. The selection is
- * `[start, end)` in document display cells (one cell per newline); both
- * wrappers are single-cell ASCII, so the range moves right by the opening
- * wrapper and ends one cell later.
+ * Selection to restore after wrapping. The selection is `[start, end)` in
+ * document offsets; the replacement inserts both wrappers, so the whole
+ * wrapped run is selected again. That is what makes wrappers chain: `{` over
+ * `text` leaves `{text}` selected, and `*` over that leaves `*{text}*`
+ * selected instead of reaching into the braces.
  */
 export function selectionAfterWrap(
   selection: { readonly start: number; readonly end: number },
   wrapper: Wrapper,
 ): { readonly start: number; readonly end: number } {
-  return { start: selection.start + wrapper.open.length, end: selection.end + wrapper.open.length }
+  return { start: selection.start, end: selection.end + wrapper.open.length + wrapper.close.length }
 }
 
 /** Just enough of an edit buffer to add a line: a textarea, in practice. */

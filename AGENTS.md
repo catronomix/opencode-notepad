@@ -22,8 +22,9 @@ An OpenCode plugin (`opencode-note`) with two parts:
 - OpenCode loads `tui.tsx` with a plain JSX transform: JSX props are evaluated
   once and never re-render. Anything that changes at runtime is written onto the
   renderable from `sync()` — do not reintroduce signal reads in JSX.
-- Keys arrive twice (renderable `onKeyDown` and keymap layers); the `guarded()`
-  throttle keeps one physical key from being handled twice.
+- Keys arrive twice (renderable `onKeyDown` and keymap layers); per-key guards
+  (`guardedNewline`, `guardedTab`, `edgeGuard`) keep one physical key from being
+  handled twice, and `closing` keeps Escape one-shot.
 
 ## Checks
 
