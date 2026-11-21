@@ -24,6 +24,7 @@ import {
 import type { Context, Route } from "@opencode/plugin/tui/context"
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal, onCleanup } from "solid-js"
+import { execFileSync } from "node:child_process"
 
 import { indentFor, insertNewline, pageRows, printable, selectionAfterWrap, wrapSelection, wrapperFor } from "./editor.ts"
 import { btwRequest, formatRequest, transcriptOf } from "./llm.ts"
@@ -72,7 +73,8 @@ const KEY_BINDINGS = [
 interface PageState {
   readonly sessionID: string
   readonly created: boolean
-  readonly previous: Route
+  /** The screen the page was opened over, read from the tab bar (see `returnRoute`). */
+  readonly origin: Route
   /** The session's own working directory: files resolve against it, never `process.cwd()`. */
   readonly directory: string
 }
@@ -118,12 +120,11 @@ export default Plugin.define({
       if (current.type === "plugin" && current.name === PAGE) return
       const tabs = context.ui.tabs.enabled() ? context.ui.tabs.list() : []
       const activeTab = tabs.find((tab) => tab.active)?.sessionID
-      // The page remembers the route object it was opened over and hands it
-      // back verbatim on close, so the host reuses that screen. The note itself
-      // still belongs to the active chat, which on the home screen is only
-      // known from the tab bar.
-      const previous: Route = current
-      let sessionID = activeTab ?? (current.type === "session" ? current.sessionID : undefined)
+      // The host moves to this page before the command runs, so the route under
+      // it is not available here. The tab bar is: an active tab is the chat on
+      // screen, no active tab is the home screen.
+      const origin: Route = activeTab ? { type: "session", sessionID: activeTab } : { type: "home" }
+      let sessionID = activeTab
       let created = false
       // Files resolve against the chat's own working directory, never against
       // `process.cwd()` (which is only the directory the TUI was launched in).
@@ -137,8 +138,7 @@ export default Plugin.define({
       if (!sessionID) {
         // A brand-new chat has no session yet. Committing one through the API
         // (no prompt, no model call) is what gives the note a stable home. Its
-        // tab is deliberately not focused and it is never navigated to on close:
-        // the page is opened over whatever the user was looking at.
+        // tab is deliberately not focused: closing goes home, never to it.
         try {
           const session = await context.client.session.create({ location: { directory } })
           sessionID = session.id
@@ -149,7 +149,7 @@ export default Plugin.define({
           return
         }
       }
-      page = { sessionID, created, previous, directory }
+      page = { sessionID, created, origin, directory }
       context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created, directory } })
     }
 
@@ -161,12 +161,13 @@ export default Plugin.define({
     const closePage = (insert?: string) => {
       const state = page
       page = undefined
-      // Closing hands back the route snapshot the page was opened over, exactly
-      // the way the host's own `opencode.stats` page closes: it keeps
-      // `{...router.current()}` and calls `router.navigate(snapshot)`. It never
-      // navigates to a session of its own, because the host's tab store opens a
-      // tab for every session route that becomes current.
-      context.ui.router.navigate(state ? (insert === undefined ? returnRoute(state) : insertRoute(state)) : { type: "home" })
+      // Closing returns to the chat the page was opened over (or home when the
+      // page had to create the chat). Insert instead goes to the note's own
+      // chat, which is where its text has to be pasted. Neither resolves a
+      // session of its own: the host's tab store opens a tab for every session
+      // route that becomes current, so an existing chat reuses its screen.
+      const destination = state ? (insert === undefined ? returnRoute(state) : insertRoute(state)) : { type: "home" as const }
+      context.ui.router.navigate(destination)
 
       if (insert !== undefined) {
         const started = Date.now()
@@ -280,6 +281,9 @@ function Note(props: NoteProps) {
     muted: theme.text.muted,
     faint: theme.text.faint,
     accent: theme.text.action.primary.base,
+    // The theme's selection token resolves to a transparent black here, which
+    // draws nothing; the action accent is the visible selection block.
+    selection: theme.text.action.primary.base,
   }
 
   const [_size, _setSize] = createSignal({
@@ -413,12 +417,16 @@ function Note(props: NoteProps) {
 
   const focusEditor = () => {
     setMode("editor")
-    queueMicrotask(() => area?.focus())
+    queueMicrotask(() => {
+      area?.focus()
+      sync()
+    })
   }
 
   const focusButtons = () => {
     setMode("buttons")
     area?.blur()
+    sync()
   }
 
   const close = () => {
@@ -427,11 +435,11 @@ function Note(props: NoteProps) {
   }
 
   /**
-   * Escape is layered and one-shot: while the dialog is open it closes only the
-   * dialog; otherwise a single Escape closes the view. `closing` absorbs the
-   * second delivery of the same press (the textarea path and the keymap layer
-   * both see it), and `dialogSettled()` absorbs the press the dialog already
-   * used.
+   * Escape is layered: a dialog is closed first, then focus returns from the
+   * button bar to the editor, and only an Escape in the editor leaves the view.
+   * `closing` absorbs the second delivery of the same press (the textarea path
+   * and the keymap layer both see it), and `dialogSettled()` absorbs the press
+   * the dialog already used.
    */
   const requestClose = () => {
     if (closing) return
@@ -440,6 +448,10 @@ function Note(props: NoteProps) {
       return
     }
     if (dialogSettled()) return
+    if (mode() === "buttons") {
+      focusEditor()
+      return
+    }
     closing = true
     close()
   }
@@ -483,6 +495,43 @@ function Note(props: NoteProps) {
     }
     const copied = context.renderer.copyToClipboardOSC52(selected)
     setStatus(copied ? `Copied ${selected.length} characters` : "Could not reach the clipboard")
+  }
+
+  /**
+   * The clipboard is only writable through OpenTUI (`copyToClipboardOSC52`),
+   * so pasting reads the OS clipboard directly. Ctrl+V is claimed before the
+   * textarea: the host's `prompt.paste` belongs to the chat prompt, not here.
+   */
+  const readClipboard = (): string | undefined => {
+    const options = { encoding: "utf8" as const, timeout: 3000, windowsHide: true }
+    try {
+      if (process.platform === "win32") {
+        return execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"], options)
+      }
+      if (process.platform === "darwin") return execFileSync("pbpaste", [], options)
+      try {
+        return execFileSync("wl-paste", ["-n"], options)
+      } catch {
+        return execFileSync("xclip", ["-selection", "clipboard", "-o"], options)
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  const pasteClipboard = () => {
+    if (!area) return
+    const text = readClipboard()
+    if (text === undefined) {
+      setStatus("Could not read the clipboard")
+      return
+    }
+    if (!text) {
+      setStatus("The clipboard is empty")
+      return
+    }
+    area.insertText(text.replace(/\r\n/g, "\n").replace(/\n$/, ""))
+    persist()
   }
 
   /** Wraps the selection with the typed character, keeping the inner text selected. */
@@ -817,6 +866,11 @@ function Note(props: NoteProps) {
       copySelection()
       return
     }
+    if (key.name === "v" && key.ctrl) {
+      key.preventDefault()
+      pasteClipboard()
+      return
+    }
     const typed = printable(key)
     if (typed !== undefined && wrapTyped(typed)) key.preventDefault()
   }
@@ -1069,6 +1123,8 @@ function Note(props: NoteProps) {
           focusedBackgroundColor={colors.panel}
           textColor={colors.text}
           focusedTextColor={colors.text}
+          selectionBg={colors.selection}
+          selectionFg={colors.panel}
           cursorColor={colors.accent}
           placeholder="Write anything. It stays here, out of the chat."
           onContentChange={() => persist()}

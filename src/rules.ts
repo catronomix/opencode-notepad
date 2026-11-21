@@ -64,34 +64,32 @@ export function panelWidth(windowWidth: number): number {
 }
 
 /**
- * Where closing the note returns to: the route snapshot taken when the page
- * opened, handed back verbatim.
+ * Where closing the note returns to.
  *
- * The host has no route history: `ui.router` exposes only
- * `register/navigate/current`, and `Route.navigate` sets a single route signal.
- * The built-in full-screen pages therefore snapshot the route they were opened
- * over and navigate to that snapshot when they close — `opencode.stats` keeps
- * `let[n,r]=W({...t.ui.router.current()})` and closes with
- * `t.ui.router.navigate(n())` — instead of resolving a session.
+ * The host navigates to a plugin route *before* the plugin's command runs, so
+ * `ui.router.current()` inside the command is already this page: there is no
+ * previous route to capture, and `ui.router` exposes no history or change
+ * event (`register/navigate/current` only). The screen underneath is therefore
+ * read from the session tab bar, which is what the host itself uses to know
+ * which chat is on screen: an active tab means the page was opened over that
+ * chat, otherwise it was opened over the home screen.
+ *
+ * A chat the page had to create has no screen of its own yet, so closing it
+ * goes home — navigating to a freshly created session is exactly what made
+ * closing open a new tab.
  */
-export function returnRoute(state: { readonly previous: Route }): Route {
-  return state.previous
+export function returnRoute(state: { readonly created: boolean; readonly origin: Route }): Route {
+  return state.created ? { type: "home" } : state.origin
 }
 
 /**
- * Where Insert goes: the chat of the note's own session, which is the only
- * place the note can be pasted into. When the page was opened over that very
- * session, the captured route object is reused, so the host keeps the tab and
- * screen it already had instead of resolving one from a session ID.
+ * Where Insert goes: the chat the note belongs to, because that is the only
+ * prompt its text can be pasted into. An existing screen of that chat is
+ * reused; a note that created its own chat has no screen yet, and its tab is
+ * opened by the host's tab store when this route becomes current.
  */
-export function insertRoute(state: {
-  readonly created: boolean
-  readonly sessionID: string
-  readonly previous: Route
-}): Route {
-  if (!state.created && state.previous.type === "session" && state.previous.sessionID === state.sessionID) {
-    return state.previous
-  }
+export function insertRoute(state: { readonly sessionID: string; readonly origin: Route }): Route {
+  if (state.origin.type === "session" && state.origin.sessionID === state.sessionID) return state.origin
   return { type: "session", sessionID: state.sessionID }
 }
 
