@@ -57,6 +57,22 @@ export function selectionAfterWrap(
   return { start: selection.start + wrapper.open.length, end: selection.end + wrapper.open.length }
 }
 
+/** Just enough of an edit buffer to add a line: a textarea, in practice. */
+export interface NewlineTarget {
+  newLine(): boolean
+  insertText(text: string): void
+}
+
+/**
+ * Enter's whole effect: a new line, plus the configured indentation when the
+ * caller asked for it (Ctrl+Return). Shared by the textarea's own submit hook
+ * and the keymap command, so both routes through the host agree.
+ */
+export function insertNewline(target: NewlineTarget, indent = ""): void {
+  target.newLine()
+  if (indent) target.insertText(indent)
+}
+
 /** Rows a PageUp/PageDown moves the cursor, given the editor's visible height. */
 export function pageRows(editorHeight: number): number {
   return Math.max(1, Math.floor(editorHeight) - 1)

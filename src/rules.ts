@@ -7,7 +7,7 @@
  */
 import type { Route } from "@opencode/plugin/tui/context"
 
-import { listPathMatches, noteFileExists, resolveNotePath } from "./note.ts"
+import { listPathMatches, noteFileExists, resolveNotePath, type PathMatch } from "./note.ts"
 
 /**
  * The path the save dialog writes to. An empty or blank answer means `NOTE.md`;
@@ -31,6 +31,15 @@ export function applyCompletion(query: string, label: string): string {
 }
 
 /**
+ * Completion rows for the dialog: none until something has been typed. An
+ * empty field is not a query, and listing the whole project there would put a
+ * directory listing in front of every Save.
+ */
+export function dialogMatches(cwd: string, query: string): PathMatch[] {
+  return query.trim() === "" ? [] : listPathMatches(cwd, completionQuery(query))
+}
+
+/**
  * Escape is layered: while the filename dialog is open it closes only the
  * dialog. The note view closes only on a later Escape.
  */
@@ -48,8 +57,9 @@ export function panelWidth(windowWidth: number): number {
 }
 
 /**
- * Where closing the note returns to: the session the page was opened from, and
- * home only when there genuinely was no session to return to.
+ * Where closing the note returns to: the route the page was opened over, kept
+ * verbatim so the host reuses that screen and its tab instead of resolving a
+ * new one. Only a session this page had to create has no captured route.
  */
 export function returnRoute(state: {
   readonly created: boolean
@@ -57,15 +67,138 @@ export function returnRoute(state: {
   readonly previous: Route
 }): Route {
   if (state.created) return { type: "session", sessionID: state.sessionID }
-  if (state.previous.type === "session") return state.previous
-  return { type: "home" }
+  return state.previous
 }
+
+/**
+ * Where Insert goes: the chat of the note's own session, which is the only
+ * place the note can be pasted into. When the page was opened over that very
+ * session, the captured route object is reused, so the host keeps the tab and
+ * screen it already had instead of resolving one from a session ID.
+ */
+export function insertRoute(state: {
+  readonly created: boolean
+  readonly sessionID: string
+  readonly previous: Route
+}): Route {
+  if (!state.created && state.previous.type === "session" && state.previous.sessionID === state.sessionID) {
+    return state.previous
+  }
+  return { type: "session", sessionID: state.sessionID }
+}
+
+/**
+ * Enter's binding in the page's own keymap layer. OpenCode binds a bare
+ * `return` to `input.submit` for every focused edit buffer and consumes it
+ * before the textarea can insert a newline; `input_newline` is bound only to
+ * `shift+return,ctrl+return,alt+return,ctrl+j`. Claiming `return` here, at a
+ * higher layer priority, is what puts the plain Enter back.
+ */
+export const NEWLINE_BIND = "return"
+
+/** Both filename dialogs draw the same box; only the wording of their actions differs. */
+export interface DialogSpec {
+  readonly title: string
+  readonly hint: string
+  readonly placeholder: string
+}
+
+export function dialogSpec(kind: "save" | "load"): DialogSpec {
+  return {
+    title: kind === "save" ? "Save note to a file" : "Load a file into the note",
+    hint: kind === "save" ? "Enter writes · Tab completes · Esc cancels" : "Enter opens · Tab completes · Esc cancels",
+    placeholder: "NOTE.md",
+  }
+}
+
+/** Content rows both dialogs reserve: title, directory, input, hint and completions. */
+export const DIALOG_HEIGHT = 11
+export const DIALOG_MATCH_ROWS = 5
 
 /** What Enter in the load dialog does. */
 export type LoadPlan =
   | { readonly kind: "open"; readonly path: string }
   | { readonly kind: "browse"; readonly query: string }
   | { readonly kind: "nothing" }
+
+/**
+ * The filename field of the dialog. The page owns this buffer: while the dialog
+ * is open the note's textarea is blurred and not focusable, so nothing a key
+ * does can reach the note behind it.
+ */
+export interface DialogState {
+  readonly text: string
+  readonly caret: number
+}
+
+export const emptyDialog = (): DialogState => ({ text: "", caret: 0 })
+
+export type DialogResult =
+  | { readonly type: "state"; readonly state: DialogState }
+  | { readonly type: "commit" }
+  | { readonly type: "complete" }
+  | { readonly type: "cancel" }
+
+/** Just enough of the host's `KeyEvent` to decide what a keystroke means. */
+export interface DialogKey {
+  readonly name: string
+  readonly sequence?: string
+  readonly ctrl?: boolean
+  readonly meta?: boolean
+  readonly shift?: boolean
+  readonly option?: boolean
+  readonly super?: boolean
+}
+
+/** A printable character: one code point and not a control character. */
+export function printableChar(sequence: string | undefined): string | undefined {
+  if (!sequence) return undefined
+  const first = String.fromCodePoint(sequence.codePointAt(0) ?? 0)
+  if (first.length !== sequence.length) return undefined
+  return first >= " " && first !== "\u007f" ? first : undefined
+}
+
+/**
+ * The dialog's whole keyboard behaviour, in one place. Every key the dialog
+ * receives is settled here: characters, Backspace, Delete, Left/Right,
+ * Home/End, Enter, Tab and Escape. Nothing falls through to the note.
+ */
+export function dialogKey(state: DialogState, key: DialogKey): DialogResult {
+  const { text, caret } = state
+  const at = Math.max(0, Math.min(text.length, caret))
+  const move = (position: number): DialogResult => ({ type: "state", state: { text, caret: Math.max(0, Math.min(text.length, position)) } })
+  switch (key.name) {
+    case "escape":
+      return { type: "cancel" }
+    case "tab":
+      return { type: "complete" }
+    case "return":
+    case "kpenter":
+    case "enter":
+    case "linefeed":
+      return { type: "commit" }
+    case "backspace":
+      if (at === 0) return { type: "state", state }
+      return { type: "state", state: { text: text.slice(0, at - 1) + text.slice(at), caret: at - 1 } }
+    case "delete":
+      if (at >= text.length) return { type: "state", state }
+      return { type: "state", state: { text: text.slice(0, at) + text.slice(at + 1), caret: at } }
+    case "left":
+      return move(at - 1)
+    case "right":
+      return move(at + 1)
+    case "home":
+      return move(0)
+    case "end":
+      return move(text.length)
+  }
+  // Ctrl/Alt/Meta combinations are the host's business (paste, clipboard) and
+  // must not be typed into a filename, but they are still consumed.
+  if (key.ctrl || key.meta || key.option || key.super) return { type: "state", state }
+  const typed = printableChar(key.sequence)
+  if (typed === undefined) return { type: "state", state }
+  return { type: "state", state: { text: text.slice(0, at) + typed + text.slice(at), caret: at + typed.length } }
+}
 
 /**
  * Enter in the load dialog: open the typed path, walk into a directory, or fall

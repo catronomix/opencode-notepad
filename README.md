@@ -50,7 +50,7 @@ TUI to pick it up.
 | <kbd>/note</kbd>, palette “Note”           | open the scratchpad for the current chat            |
 | <kbd>Esc</kbd>                             | close the filename dialog, else the scratchpad; cancels a running call |
 | <kbd>Tab</kbd>                             | move focus between the editor and the button bar    |
-| <kbd>Return</kbd>                          | newline                                             |
+| <kbd>Return</kbd>                          | newline (the page takes it back from the host's `input.submit` binding) |
 | <kbd>Ctrl</kbd>+<kbd>Return</kbd>          | newline and indent                                  |
 | <kbd>Home</kbd> / <kbd>End</kbd>           | start / end of the line                             |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd>          | a screen up / down (<kbd>Shift</kbd> selects)       |
@@ -86,11 +86,16 @@ the client API and inlines them into the prompt instead.
   70% width and height, at least 80 columns wide and never wider than the
   terminal. The TUI plugin API has no floating layer above the chat, so the chat
   is hidden while the note is open.
-- `Insert` waits for the chat route to come back, then writes into the prompt's
-  edit buffer. When no editor is available it copies the text with OSC 52 and
-  shows a toast.
-- Closing returns to the session the note was opened from, or home when there was
-  no session yet. Escape closes the filename dialog first and the note second.
+- `Insert` returns to the note's own chat, waits for its prompt to come back, and
+  writes into that edit buffer; the note stays there for the next message. When
+  no prompt is found the page says so in a toast and inserts nothing — it never
+  pastes into another buffer and never opens a different session.
+- Closing returns to the exact screen the note was opened over, so the host
+  reuses that route and its tab; home only when the page had to start a session.
+  Escape closes the filename dialog first and the note second.
+- `[s]ave` and `[l]oad` share one dialog: same box, same title/hint rows, and no
+  path completions until something has been typed. While the dialog is open it
+  owns the keyboard — the note's textarea is blurred and not focusable.
 - A brand-new chat has no session yet; opening the note commits one through the
   API (no prompt, no model call) so the note has somewhere stable to live.
 - Deleting a chat deletes its note.

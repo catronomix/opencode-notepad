@@ -25,10 +25,27 @@ import type { Context, Route } from "@opencode/plugin/tui/context"
 import { Plugin } from "@opencode/plugin/tui"
 import { createSignal, onCleanup } from "solid-js"
 
-import { indentFor, pageRows, printable, selectionAfterWrap, wrapSelection, wrapperFor } from "./editor.ts"
+import { indentFor, insertNewline, pageRows, printable, selectionAfterWrap, wrapSelection, wrapperFor } from "./editor.ts"
 import { btwRequest, formatRequest, transcriptOf } from "./llm.ts"
-import { listPathMatches, noteFileExists, noteKey, readNoteFile, resolveNotePath, writeNoteFile } from "./note.ts"
-import { applyCompletion, completionQuery, escapeTarget, loadPlan, panelWidth, saveTarget, returnRoute } from "./rules.ts"
+import { listPathMatches, noteKey, readNoteFile, resolveNotePath, writeNoteFile } from "./note.ts"
+import {
+  DIALOG_HEIGHT,
+  DIALOG_MATCH_ROWS,
+  NEWLINE_BIND,
+  applyCompletion,
+  completionQuery,
+  dialogKey,
+  dialogMatches,
+  dialogSpec,
+  emptyDialog,
+  escapeTarget,
+  insertRoute,
+  loadPlan,
+  panelWidth,
+  returnRoute,
+  saveTarget,
+  type DialogState,
+} from "./rules.ts"
 
 const PAGE = "opencode-note"
 
@@ -74,20 +91,20 @@ export default Plugin.define({
     }
 
     /**
-     * The chat input to insert into. The host rebuilds the prompt when the route
-     * changes, so the renderable that had focus when the overlay opened is
-     * usually gone. Prefer whatever holds focus once the session route is back,
-     * and only then fall back to walking the tree for an edit buffer — which is
-     * what makes insertion work in an existing session after a slow re-render.
+     * The chat prompt to insert into. The host rebuilds the prompt when the
+     * route changes, so the renderable that had focus when the overlay opened
+     * is usually gone. What replaces it is focused by the host as soon as the
+     * session screen comes back (`focusable = true; focus()` in its prompt
+     * effect), so focus decides first and the tree is only the fallback.
      */
     const findChatInput = (avoid: string): EditBufferRenderable | undefined => {
-      const usable = (node: EditBufferRenderable) => !node.isDestroyed && node.plainText !== avoid
+      const usable = (node: EditBufferRenderable) => !node.isDestroyed && node.visible && node.plainText !== avoid
       const focused = context.renderer.currentFocusedEditor
       if (focused && usable(focused)) return focused
       const found: EditBufferRenderable[] = []
       const walk = (node: Renderable) => {
         if (node.isDestroyed) return
-        if (isEditBufferRenderable(node) && node.visible && usable(node)) found.push(node)
+        if (isEditBufferRenderable(node) && usable(node)) found.push(node)
         for (const child of node.getChildren?.() ?? []) walk(child)
       }
       walk(context.renderer.root)
@@ -99,10 +116,11 @@ export default Plugin.define({
       if (current.type === "plugin" && current.name === PAGE) return
       const tabs = context.ui.tabs.enabled() ? context.ui.tabs.list() : []
       const activeTab = tabs.find((tab) => tab.active)?.sessionID
-      // Remember the session, not just the route: a note opened from the home
-      // screen with a tab active still belongs to that tab and must go back to it.
-      const previous: Route =
-        current.type === "session" ? current : activeTab ? { type: "session", sessionID: activeTab } : current
+      // The page remembers the route object it was opened over and hands it
+      // back verbatim on close, so the host reuses that screen and its tab.
+      // The note itself still belongs to the active chat, which on the home
+      // screen is only known from the tab bar.
+      const previous: Route = current
       let sessionID = activeTab ?? (current.type === "session" ? current.sessionID : undefined)
       let created = false
       if (!sessionID) {
@@ -124,15 +142,13 @@ export default Plugin.define({
 
     /**
      * Leaves the page. With `insert`, the note (or the fragment that was
-     * selected) is written into the chat input once the host has restored it.
+     * selected) is written into the chat prompt of its own session once the
+     * host has restored that screen.
      */
     const closePage = (insert?: string) => {
       const state = page
       page = undefined
-      const destination: Route = state
-        ? returnRoute(state)
-        : { type: "home" }
-      context.ui.router.navigate(destination)
+      context.ui.router.navigate(state ? (insert === undefined ? returnRoute(state) : insertRoute(state)) : { type: "home" })
 
       if (insert !== undefined) {
         const started = Date.now()
@@ -159,11 +175,12 @@ export default Plugin.define({
             setTimeout(attempt, 60)
             return
           }
-          context.renderer.copyToClipboardOSC52(insert)
+          // No prompt after the restore: say so and stay put, rather than
+          // navigating somewhere else or pasting into the wrong buffer.
           context.ui.toast.show({
             title: "Note",
-            message: "No chat input was available: the note is on the clipboard instead",
-            variant: "warning",
+            message: "Could not find this chat's input after reopening it: the note was not inserted",
+            variant: "error",
           })
         }
         setTimeout(attempt, 40)
@@ -264,7 +281,8 @@ function Note(props: NoteProps) {
 
   const [_mode, _setMode] = createSignal<"editor" | "buttons">("editor")
   const [_cursor, _setCursor] = createSignal(0)
-  const [_dialog, _setDialog] = createSignal<{ readonly kind: "save" | "load"; readonly query: string } | null>(null)
+  const [_dialog, _setDialog] = createSignal<{ readonly kind: "save" | "load" } | null>(null)
+  const [_dialogText, _setDialogText] = createSignal<DialogState>(emptyDialog())
   const [_status, _setStatus] = createSignal("")
   const [_busy, _setBusy] = createSignal<{ readonly kind: "format" | "btw"; readonly label: string } | null>(null)
 
@@ -272,6 +290,7 @@ function Note(props: NoteProps) {
   const mode = _mode
   const cursor = _cursor
   const dialog = _dialog
+  const dialogValue = _dialogText
   const status = _status
   const busy = _busy
 
@@ -287,7 +306,7 @@ function Note(props: NoteProps) {
     else _setCursor(value)
     sync()
   }
-  const setDialog = (value: { readonly kind: "save" | "load"; readonly query: string } | null) => {
+  const setDialog = (value: { readonly kind: "save" | "load" } | null) => {
     _setDialog(value)
     sync()
   }
@@ -343,6 +362,18 @@ function Note(props: NoteProps) {
   let tabGuard = 0
   /** When the filename dialog last closed: the same Escape must not close the view. */
   let dialogClosedAt = 0
+  /**
+   * One physical Enter reaches the page twice: once through the keymap (where
+   * the page claims `return`) and once through the textarea's own key handler.
+   * A short window keeps it a single newline without swallowing a second press.
+   */
+  let newlineGuard = 0
+  const guardedNewline = (): boolean => {
+    const now = Date.now()
+    if (now - newlineGuard < 30) return false
+    newlineGuard = now
+    return true
+  }
   const guarded = (slot: "close" | "tab"): boolean => {
     const now = Date.now()
     if (slot === "close") {
@@ -434,18 +465,34 @@ function Note(props: NoteProps) {
   }
 
   // ---- filename dialog: Save and Load share one implementation ------------
+  //
+  // While a dialog is open it owns the keyboard outright: the note's textarea
+  // is blurred and not focusable, the page keymap layers are switched off, and
+  // the dialog box itself takes focus and settles every key in `onDialogKey`.
+  // Nothing a key does can reach the note behind it.
 
-  const dialogQuery = () => dialog()?.query ?? ""
-  const completions = () => (dialog() === null ? [] : listPathMatches(cwd, completionQuery(dialogQuery())))
+  const dialogQuery = () => dialogValue().text
+  const completions = () => (dialog() === null ? [] : dialogMatches(cwd, dialogQuery()))
+
+  const setDialogValue = (state: DialogState) => {
+    _setDialogText(state)
+    sync()
+  }
 
   function openDialog(kind: "save" | "load") {
     if (busy()) return
     setMode("editor")
     setStatus("")
-    setDialog({ kind, query: "" })
-    // The editor keeps focus so typing still arrives through `onEditorKey`; the
-    // dialog draws over it and swallows the keys it needs.
-    queueMicrotask(() => area?.focus())
+    setDialogValue(emptyDialog())
+    setDialog({ kind })
+    queueMicrotask(() => {
+      if (area) {
+        area.blur()
+        area.focusable = false
+      }
+      dialogBox?.focus()
+      sync()
+    })
   }
 
   function closeDialog() {
@@ -453,22 +500,19 @@ function Note(props: NoteProps) {
     dialogClosedAt = Date.now()
     setDialog(null)
     setStatus("")
-    queueMicrotask(() => area?.focus())
-  }
-
-  function updateDialogQuery(change: (query: string) => string) {
-    const state = dialog()
-    if (!state) return
-    setDialog({ kind: state.kind, query: change(state.query) })
+    queueMicrotask(() => {
+      if (area) area.focusable = true
+      area?.focus()
+    })
   }
 
   /** Tab completion: the first match, which is enough to walk into a directory. */
   function completeDialog() {
-    const state = dialog()
-    if (!state) return
-    const first = listPathMatches(cwd, completionQuery(state.query))[0]
+    if (!dialog()) return
+    const first = listPathMatches(cwd, completionQuery(dialogQuery()))[0]
     if (!first) return
-    setDialog({ kind: state.kind, query: applyCompletion(state.query, first.label) })
+    const completed = applyCompletion(dialogQuery(), first.label)
+    setDialogValue({ text: completed, caret: completed.length })
   }
 
   function saveTo(target: string) {
@@ -501,7 +545,7 @@ function Note(props: NoteProps) {
   function commitLoad(query: string) {
     const plan = loadPlan(cwd, query)
     if (plan.kind === "browse") {
-      setDialog({ kind: "load", query: plan.query })
+      setDialogValue({ text: plan.query, caret: plan.query.length })
       return
     }
     if (plan.kind === "nothing") {
@@ -516,8 +560,15 @@ function Note(props: NoteProps) {
   function commitDialog() {
     const state = dialog()
     if (!state) return
-    if (state.kind === "save") commitSave(state.query)
-    else commitLoad(state.query)
+    if (state.kind === "save") commitSave(dialogQuery())
+    else commitLoad(dialogQuery())
+  }
+
+  /** Enter in the note: a new line, plus indentation when Ctrl was held. */
+  function addNewline(indentAfter: boolean) {
+    if (!area) return
+    insertNewline(area, indentAfter ? indent : "")
+    persist()
   }
 
   const modelRef = () => {
@@ -622,39 +673,43 @@ function Note(props: NoteProps) {
 
   // ---- keyboard ------------------------------------------------------------
 
+  /**
+   * The dialog's only handler. The dialog box holds focus, so this is the one
+   * place a key is interpreted while a dialog is open; every key is consumed
+   * here, which is also what keeps it away from the note and from the keymap.
+   */
   const onDialogKey = (key: KeyEvent) => {
-    const typed = printable(key)
-    if (typed !== undefined) {
-      key.preventDefault()
-      updateDialogQuery((query) => query + typed)
+    if (dialog() === null || busy()) return
+    key.preventDefault()
+    const result = dialogKey(dialogValue(), {
+      name: key.name,
+      sequence: key.sequence,
+      ctrl: key.ctrl,
+      meta: key.meta,
+      shift: key.shift,
+      option: key.option,
+      super: key.super,
+    })
+    if (result.type === "state") {
+      setDialogValue(result.state)
       return
     }
-    if (key.name === "backspace") {
-      key.preventDefault()
-      updateDialogQuery((query) => query.slice(0, -1))
+    if (result.type === "cancel") {
+      closeDialog()
       return
     }
-    if (key.name === "return" || key.name === "kpenter" || key.name === "enter") {
-      key.preventDefault()
-      commitDialog()
-      return
-    }
-    if (key.name === "tab") {
-      key.preventDefault()
+    if (result.type === "complete") {
       completeDialog()
       return
     }
-    if (key.name === "escape") {
-      key.preventDefault()
-      closeDialog()
-    }
+    commitDialog()
   }
 
   const onEditorKey = (key: KeyEvent) => {
     if (busy()) return
     if (dialog() !== null) {
-      // The dialog owns the keyboard while it is open; the textarea is not fed.
-      onDialogKey(key)
+      // The dialog owns the keyboard while it is open; the note is not fed.
+      key.preventDefault()
       return
     }
     if (Date.now() - dialogClosedAt < 120) {
@@ -678,9 +733,10 @@ function Note(props: NoteProps) {
     }
     if (key.name === "return" || key.name === "kpenter" || key.name === "enter") {
       key.preventDefault()
-      area?.newLine()
-      if (key.ctrl && indent) area?.insertText(indent)
-      persist()
+      // A new line, plus the configured indent when Ctrl was held. Both this
+      // path and the keymap command go through `guardedNewline`, because the
+      // host delivers one physical Enter to both.
+      if (guardedNewline()) addNewline(key.ctrl === true)
       return
     }
     if (key.name === "pageup") {
@@ -703,7 +759,8 @@ function Note(props: NoteProps) {
   }
 
   // Which layer is live follows the focus: the textarea handles the editor, the
-  // keymap handles the button bar and the running model call.
+  // keymap handles the button bar and the running model call. The filename
+  // dialog is not here at all: it takes focus and handles its own keys.
   context.keymap.layer(() => ({
     mode: "global",
     priority: 110,
@@ -711,6 +768,11 @@ function Note(props: NoteProps) {
     commands: [
       { id: "opencode-note.editor.escape", bind: "escape", run: () => requestClose() },
       { id: "opencode-note.editor.buttons", bind: "tab", run: () => { if (guarded("tab")) focusButtons() } },
+      // Enter belongs to the note, but OpenCode binds a bare `return` to
+      // `input.submit` for the focused editor and consumes it before the
+      // textarea sees it. Claiming it here (higher priority) restores the
+      // newline; Ctrl+Return stays the indented variant.
+      { id: "opencode-note.editor.newline", bind: NEWLINE_BIND, run: () => { if (guardedNewline()) addNewline(false) } },
     ],
   }))
 
@@ -745,19 +807,6 @@ function Note(props: NoteProps) {
     priority: 130,
     enabled: () => busy() !== null,
     commands: [{ id: "opencode-note.busy.cancel", bind: "escape", run: () => cancelWork() }],
-  }))
-
-  // The filename dialog wins over every page binding: its Escape closes the
-  // dialog, never the view, and Enter commits instead of adding a newline.
-  context.keymap.layer(() => ({
-    mode: "global",
-    priority: 140,
-    enabled: () => dialog() !== null && !busy(),
-    commands: [
-      { id: "opencode-note.dialog.escape", bind: "escape", run: () => closeDialog() },
-      { id: "opencode-note.dialog.commit", bind: "return,enter", run: () => commitDialog() },
-      { id: "opencode-note.dialog.complete", bind: "tab", run: () => completeDialog() },
-    ],
   }))
 
   // ---- rendering -----------------------------------------------------------
@@ -843,29 +892,31 @@ function Note(props: NoteProps) {
 
   const dialogWidth = () =>
     Math.max(1, Math.min(Math.max(1, innerWidth() - 2), Math.max(40, Math.floor(size().width * 0.6))))
-  const DIALOG_HEIGHT = 9
 
   const syncDialog = () => {
     const state = dialog()
     if (!dialogBox) return
     dialogBox.visible = state !== null
     if (!state) return
+    const spec = dialogSpec(state.kind)
     const width = dialogWidth()
     dialogBox.width = width
     dialogBox.height = DIALOG_HEIGHT
     dialogBox.top = Math.max(0, Math.floor((size().height - DIALOG_HEIGHT) / 2))
     dialogBox.left = Math.max(0, Math.floor((size().width - width) / 2))
-    if (dialogTitle) dialogTitle.content = state.kind === "save" ? "Save note to a file" : "Load a file into the note"
+    if (dialogTitle) dialogTitle.content = spec.title
     if (dialogDirectory) dialogDirectory.content = `relative to ${context.ui.format.path(cwd)}`
+    const value = dialogValue().text
     if (dialogInput) {
-      dialogInput.content = state.query
-        ? styled([{ text: "> ", fg: colors.accent }, { text: state.query, fg: colors.text }])
-        : styled([{ text: "> ", fg: colors.accent }, { text: "NOTE.md", fg: colors.faint }])
+      dialogInput.content = value
+        ? styled([{ text: "> ", fg: colors.accent }, { text: value, fg: colors.text }])
+        : styled([{ text: "> ", fg: colors.accent }, { text: spec.placeholder, fg: colors.faint }])
     }
     if (dialogHint) {
-      const named = completionQuery(state.query) === "" && noteFileExists(cwd, "NOTE.md")
-      dialogHint.visible = state.kind === "load" && named
-      dialogHint.content = "  NOTE.md  (Enter opens it)"
+      // A message from the last attempt ("Nothing to load…") takes the row;
+      // otherwise the dialog always says what its keys do.
+      dialogHint.content = status() || spec.hint
+      dialogHint.fg = status() ? colors.accent : colors.faint
     }
     const rows = completions().slice(0, matchRows.length)
     matchRows.forEach((row, index) => {
@@ -973,6 +1024,8 @@ function Note(props: NoteProps) {
         flexDirection="column"
         paddingLeft={1}
         paddingRight={1}
+        focusable
+        onKeyDown={onDialogKey}
         visible={false}
       >
         <text
@@ -1005,9 +1058,8 @@ function Note(props: NoteProps) {
           wrapMode="none"
           content=""
           fg={colors.faint}
-          visible={false}
         />
-        {[0, 1, 2, 3, 4].map((index) => (
+        {Array.from({ length: DIALOG_MATCH_ROWS }, (_, index) => (
           <text
             ref={(node: TextRenderable) => {
               matchRows[index] = node
