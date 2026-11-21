@@ -41,7 +41,7 @@ TUI to pick it up.
 
 | option   | default | meaning                                                            |
 | -------- | ------- | ------------------------------------------------------------------ |
-| `indent` | `2`     | Indentation inserted by <kbd>Ctrl</kbd>+<kbd>Return</kbd>. A number of spaces or a literal string such as `"\t"`. |
+| `indent` | `2`     | One indentation level, added by <kbd>Ctrl</kbd>+<kbd>Return</kbd> on top of the current line's own indentation. A number of spaces or a literal string such as `"\t"`. |
 
 ## Keys
 
@@ -51,10 +51,13 @@ TUI to pick it up.
 | <kbd>Esc</kbd>                             | close the filename dialog, else the scratchpad in one press; cancels a running call |
 | <kbd>Tab</kbd>                             | move focus between the editor and the button bar    |
 | <kbd>Return</kbd>                          | newline (the page takes it back from the host's `input.submit` binding) |
-| <kbd>Ctrl</kbd>+<kbd>Return</kbd>          | newline and indent                                  |
+| <kbd>Ctrl</kbd>+<kbd>Return</kbd>          | newline, carrying the current line's indentation and adding one level |
 | <kbd>Home</kbd> / <kbd>End</kbd>           | start / end of the current line (<kbd>Shift</kbd> selects to it) |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd>          | a screen up / down (<kbd>Shift</kbd> selects)       |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd>               | copy the selection                                  |
+| <kbd>Ctrl</kbd>+<kbd>Insert</kbd>          | copy the selection (the POSIX copy)                 |
+| <kbd>Ctrl</kbd>+<kbd>V</kbd>               | paste the clipboard into the note                   |
+| <kbd>Shift</kbd>+<kbd>Insert</kbd>         | paste — handled by the terminal, not by this plugin |
 | <kbd>←</kbd> <kbd>→</kbd> in the bar       | pick a button                                       |
 | <kbd>Return</kbd> / <kbd>Space</kbd>       | press the selected button                           |
 
@@ -104,6 +107,26 @@ the client API and inlines them into the prompt instead.
 - A brand-new chat has no session yet; opening the note commits one through the
   API (no prompt, no model call) so the note has somewhere stable to live.
 - Deleting a chat deletes its note.
+- **Known limitation: clipboard keys on Windows terminals.** Copy writes the
+  selection to the Windows clipboard (`Set-Clipboard`, with OSC 52 alongside it)
+  and paste reads that clipboard back (with OSC 52 as the fallback), so the two
+  directions use the same store. What the page cannot control is the terminal:
+  Windows Terminal, conhost and ThinkTerm each claim
+  <kbd>Ctrl</kbd>+<kbd>Insert</kbd> (their own copy) and
+  <kbd>Shift</kbd>+<kbd>Insert</kbd> (their own paste) before the application
+  sees them. In ThinkTerm that terminal-side copy has no terminal selection to
+  take and empties the clipboard, which reads as the note wiping it; the note
+  never receives the key at all. Use <kbd>Ctrl</kbd>+<kbd>C</kbd> and
+  <kbd>Ctrl</kbd>+<kbd>V</kbd>, which are not claimed by the terminal and always
+  reach the page. <kbd>Shift</kbd>+<kbd>Insert</kbd> pastes through the
+  terminal's own path and is expected to work everywhere; that has only been
+  observed on ThinkTerm so far.
+  - *Issue note:* confirmed on Windows only (cmd/PowerShell for
+    <kbd>Ctrl</kbd>+<kbd>Insert</kbd>, ThinkTerm for <kbd>Shift</kbd>+<kbd>Insert</kbd>).
+    Needs verification on a POSIX terminal and on a ThinkTerm build with a real
+    selection. If a terminal does forward the keys, they reach the page: both
+    <kbd>Ctrl</kbd>+<kbd>Insert</kbd> and <kbd>Ctrl</kbd>+<kbd>C</kbd> are bound
+    to the same copy, and <kbd>Shift</kbd>+<kbd>Insert</kbd> is not bound at all.
 
 ## Development
 

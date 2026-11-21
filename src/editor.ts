@@ -90,6 +90,40 @@ export function indentFor(option: unknown): string {
 }
 
 /**
+ * The whitespace a line starts with. Ctrl+Return copies it onto the new line,
+ * so pressing Enter inside an indented block nests instead of jumping back to
+ * column zero.
+ */
+export function leadingWhitespace(line: string): string {
+  const match = /^[ \t]*/.exec(line)
+  return match ? match[0] : ""
+}
+
+/**
+ * A colour scaled towards black, so a surface can be tinted without leaving the
+ * theme. Accepts a hex string or a resolved `RGBA`; `undefined` when the value
+ * is neither, so the caller can fall back rather than draw a wrong colour.
+ */
+export function shade(color: unknown, factor: number): string | undefined {
+  const scale = Math.max(0, Math.min(1, factor))
+  const hex = typeof color === "string" ? color.trim() : ""
+  const match = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(hex)
+  const pack = (r: number, g: number, b: number) =>
+    `#${((Math.round(r * scale) << 16) | (Math.round(g * scale) << 8) | Math.round(b * scale)).toString(16).padStart(6, "0")}`
+  if (match) {
+    const digits = match[1]
+    const full = digits.length === 3 ? digits.split("").map((digit) => digit + digit).join("") : digits.slice(0, 6)
+    const value = Number.parseInt(full, 16)
+    return pack((value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff)
+  }
+  if (color && typeof color === "object" && "toInts" in color && typeof (color as { toInts: unknown }).toInts === "function") {
+    const [r, g, b] = (color as { toInts(): [number, number, number, number] }).toInts()
+    return pack(r, g, b)
+  }
+  return undefined
+}
+
+/**
  * A single printable character typed by the user, or undefined.
  *
  * Control characters are excluded: terminals report Return as the one-character

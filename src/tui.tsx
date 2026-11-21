@@ -10,6 +10,7 @@
  * wrapping, Ctrl+Enter indentation, the button bar and the model buttons).
  */
 import {
+  RGBA,
   StyledText,
   defaultTextareaKeyBindings,
   isEditBufferRenderable,
@@ -26,7 +27,7 @@ import { Plugin } from "@opencode/plugin/tui"
 import { createSignal, onCleanup } from "solid-js"
 import { execFileSync } from "node:child_process"
 
-import { indentFor, insertNewline, pageRows, printable, selectionAfterWrap, wrapSelection, wrapperFor } from "./editor.ts"
+import { indentFor, insertNewline, leadingWhitespace, pageRows, printable, selectionAfterWrap, shade, wrapSelection, wrapperFor } from "./editor.ts"
 import { btwRequest, formatRequest, transcriptOf } from "./llm.ts"
 import { listPathMatches, noteKey, readNoteFile, resolveNotePath, writeNoteFile } from "./note.ts"
 import {
@@ -751,9 +752,19 @@ function Note(props: NoteProps) {
   }
 
   /** Enter in the note: a new line, plus indentation when Ctrl was held. */
+  /** The whitespace the cursor's line starts with, read before the line splits. */
+  function lineIndent(): string {
+    if (!area) return ""
+    const row = area.logicalCursor.row
+    const line = area.plainText.split("\n")[row] ?? ""
+    return leadingWhitespace(line)
+  }
+
   function addNewline(indentAfter: boolean) {
     if (!area) return
-    insertNewline(area, indentAfter ? indent : "")
+    // Ctrl+Return continues the current line's indentation and adds one level,
+    // so Enter inside an indented block nests instead of returning to column 0.
+    insertNewline(area, indentAfter ? lineIndent() + indent : "")
     persist()
   }
 
@@ -1148,43 +1159,47 @@ function Note(props: NoteProps) {
     Math.max(1, Math.min(Math.max(1, innerWidth() - 2), Math.max(40, Math.floor(size().width * 0.6)), 72))
 
   /**
-   * The dialog's one input row: a tinted bar (the border ink, so it reads as
-   * chrome rather than text) with a blinking block at the caret.
+   * The dialog's one input row. Its ink is the popup border's colour and its
+   * background is the panel's own colour, darkened, so the row reads as a field
+   * inside the dialog rather than as a second accent. The caret is a block of
+   * the undarkened panel colour: reversed against the field, never a coloured
+   * slab.
    */
   const inputRow = (placeholder: string) => {
     const width = Math.max(1, dialogWidth() - 4)
+    const ink = colors.accent
+    // Scene chunks take RGBA objects, not hex strings, so a shaded colour has to
+    // be parsed back into one before it reaches StyledText.
+    const shaded = shade(colors.panel, 0.25)
+    const field = shaded === undefined ? colors.border : (RGBA.fromHex(shaded) as unknown)
     const { text, caret } = dialogValue()
     const at = Math.max(0, Math.min(text.length, caret))
-    const runs: Array<{ text: string; fg?: unknown; bg?: unknown }> = [{ text: "> ", fg: colors.accent, bg: colors.border }]
+    const runs: Array<{ text: string; fg?: unknown; bg?: unknown }> = [{ text: "> ", fg: ink, bg: field }]
     let used = 2
     if (!text) {
-      runs.push({ text: " ", fg: colors.panel, bg: caretOn() ? colors.accent : colors.border })
+      runs.push({ text: " ", fg: ink, bg: caretOn() ? colors.panel : field })
       used += 1
       for (const char of placeholder) {
         if (used >= width) break
-        runs.push({ text: char, fg: colors.faint, bg: colors.border })
+        runs.push({ text: char, fg: colors.faint, bg: field })
         used += 1
       }
     } else {
       const head = text.slice(0, at)
       if (head) {
-        runs.push({ text: head, fg: colors.text, bg: colors.border })
+        runs.push({ text: head, fg: ink, bg: field })
         used += head.length
       }
       const glyph = text.charAt(at) || " "
-      runs.push(
-        caretOn()
-          ? { text: glyph, fg: colors.panel, bg: colors.accent }
-          : { text: glyph, fg: colors.text, bg: colors.border },
-      )
+      runs.push({ text: glyph, fg: ink, bg: caretOn() ? colors.panel : field })
       used += 1
       const tail = text.slice(at + 1)
       if (tail) {
-        runs.push({ text: tail, fg: colors.text, bg: colors.border })
+        runs.push({ text: tail, fg: ink, bg: field })
         used += tail.length
       }
     }
-    if (used < width) runs.push({ text: " ".repeat(width - used), bg: colors.border })
+    if (used < width) runs.push({ text: " ".repeat(width - used), bg: field })
     return styled(runs)
   }
 
@@ -1201,9 +1216,7 @@ function Note(props: NoteProps) {
     dialogBox.left = Math.max(0, Math.floor((size().width - width) / 2))
     if (dialogTitle) dialogTitle.content = spec.title
     if (dialogDirectory) dialogDirectory.content = context.ui.format.path(directory)
-    if (dialogInput) {
-      dialogInput.content = inputRow(spec.placeholder)
-    }
+    if (dialogInput) dialogInput.content = inputRow(spec.placeholder)
     if (dialogHint) {
       // A message from the last attempt ("Nothing to load…") takes the row;
       // otherwise the dialog always says what its keys do.
@@ -1324,6 +1337,10 @@ function Note(props: NoteProps) {
         border
         borderStyle="rounded"
         borderColor={colors.accent}
+        // OpenTUI repaints a focused box's border with its own focus colour
+        // (#00AAFF by default), which would stop the border matching the input
+        // row's ink. Pin both states to the ink the row uses.
+        focusedBorderColor={colors.accent}
         backgroundColor={colors.panel}
         flexDirection="column"
         paddingLeft={1}
