@@ -7,7 +7,7 @@
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 
-export { NOTE_KEY_PREFIX, noteKey } from "./keys.ts"
+export { NOTE_KEY_PREFIX, isStorageSegment, noteKey, storageSegment } from "./keys.ts"
 
 /** Resolves a user-typed path against the project directory. */
 export function resolveNotePath(cwd: string, target: string): string {
