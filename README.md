@@ -81,7 +81,9 @@ The bracketed letter is the shortcut — pressing it presses the button.
 `Format` and `Btw` use the stateless generation endpoint: the request never
 belongs to a session, so the note never leaks into the transcript and the answer
 never appears as an assistant turn. `Btw` reads the session's messages through
-the client API and inlines them into the prompt instead.
+the client API and inlines them into the prompt instead, as the first block -
+the conversation stays a stable prefix, then the note, then the instruction -
+so provider prompt caching keeps working across questions.
 
 ## Notes and limits
 

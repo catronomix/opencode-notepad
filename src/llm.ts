@@ -52,15 +52,20 @@ export function formatRequest(note: string): string {
   ].join("\n")
 }
 
+/**
+ * The /btw prompt: the chat transcript first as a stable prefix, then the note,
+ * then the instruction as the final block. Provider prompt caching keys on the
+ * leading bytes, so the conversation keeps its cache across questions while the
+ * note - the only part that changes - sits next to the instruction.
+ */
 export function btwRequest(question: string, conversation: string): string {
-  const parts = [
-    "You are answering a side question (/btw) about an ongoing coding session.",
-    "Answer the note below using the conversation as context. Be direct and brief; do not restate the question.",
+  const parts: string[] = []
+  if (conversation.trim()) parts.push("--- CONVERSATION ---", conversation, "--- END CONVERSATION ---", "")
+  parts.push("--- NOTE ---", question, "--- END NOTE ---", "")
+  parts.push(
+    "You are answering a side question (/btw) about the coding session above.",
+    "Answer the note using the conversation as context. Be direct and brief; do not restate the question.",
     "Return only the answer.",
-  ]
-  if (conversation.trim()) {
-    parts.push("", "--- CONVERSATION ---", conversation, "--- END CONVERSATION ---")
-  }
-  parts.push("", "--- NOTE ---", question, "--- END NOTE ---")
+  )
   return parts.join("\n")
 }
