@@ -70,6 +70,13 @@ const KEY_BINDINGS = [
   { name: "end", shift: true, action: "select-line-end" as const },
 ]
 
+/** The names a terminal uses for the page keys, across the parsers in play. */
+const PAGE_UP_NAMES = new Set(["pageup", "page_up", "pgup", "kp_pageup", "kppageup"])
+const PAGE_DOWN_NAMES = new Set(["pagedown", "page_down", "pgdn", "kp_pagedown", "kppagedown"])
+
+/** How long a result or error line holds the row before the hint returns. */
+const STATUS_TIMEOUT = 4000
+
 interface PageState {
   readonly sessionID: string
   readonly created: boolean
@@ -309,6 +316,7 @@ function Note(props: NoteProps) {
   const [_dialog, _setDialog] = createSignal<{ readonly kind: "save" | "load" } | null>(null)
   const [_dialogText, _setDialogText] = createSignal<DialogState>(emptyDialog())
   const [_status, _setStatus] = createSignal("")
+  const [_caretOn, _setCaretOn] = createSignal(true)
   const [_busy, _setBusy] = createSignal<{ readonly kind: "format" | "btw"; readonly label: string } | null>(null)
 
   const size = _size
@@ -317,6 +325,7 @@ function Note(props: NoteProps) {
   const dialog = _dialog
   const dialogValue = _dialogText
   const status = _status
+  const caretOn = _caretOn
   const busy = _busy
 
   // Every write goes through a wrapper so the page is redrawn at the moment the
@@ -336,8 +345,15 @@ function Note(props: NoteProps) {
     sync()
   }
   const setStatus = (value: string) => {
+    clearTimeout(statusTimer)
     _setStatus(value)
     sync()
+    // A result line is news, not chrome: it is answered at once and then gives
+    // the row back to the contextual hint after a few seconds.
+    if (value) statusTimer = setTimeout(() => {
+      _setStatus("")
+      sync()
+    }, STATUS_TIMEOUT)
   }
   const setBusy = (value: { readonly kind: "format" | "btw"; readonly label: string } | null) => {
     _setBusy(value)
@@ -348,6 +364,26 @@ function Note(props: NoteProps) {
   let latest = initialText
   let abort: AbortController | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
+  let statusTimer: ReturnType<typeof setTimeout> | undefined
+  onCleanup(() => clearTimeout(statusTimer))
+
+  // The dialog's caret is its focus indicator, so it blinks only while the
+  // dialog is open and stops with it.
+  let caretTimer: ReturnType<typeof setInterval> | undefined
+  const startCaret = () => {
+    if (caretTimer) return
+    _setCaretOn(true)
+    caretTimer = setInterval(() => {
+      _setCaretOn(!_caretOn())
+      sync()
+    }, 530)
+  }
+  const stopCaret = () => {
+    clearInterval(caretTimer)
+    caretTimer = undefined
+    _setCaretOn(true)
+  }
+  onCleanup(() => clearInterval(caretTimer))
 
   // The chat's working directory, captured when the page opened. Save and Load
   // resolve against this, never against the TUI process's cwd.
@@ -478,8 +514,20 @@ function Note(props: NoteProps) {
     else area.gotoLineEnd({ select })
   }
 
+  /**
+   * A page is the editor's own visible height, less one row of context, moved
+   * one wrapped row at a time — the same unit Up/Down use, so a wrapped line
+   * counts as the rows it occupies. The textarea has no page action of its own
+   * (`TextareaAction` has no `page-*`), and the host binds `pageup`/`pagedown`
+   * to scrolling the message list, so the page claims both here: without that
+   * claim the host's session layer sees the key first and the note never moves.
+   */
+  let pageGuard = 0
   const movePage = (direction: number, select: boolean) => {
     if (!area) return
+    const now = Date.now()
+    if (now - pageGuard < 30) return
+    pageGuard = now
     const rows = pageRows(area.height ?? 10)
     for (let index = 0; index < rows; index++) {
       if (direction < 0) area.moveCursorUp({ select })
@@ -493,14 +541,19 @@ function Note(props: NoteProps) {
       setStatus("Nothing selected")
       return
     }
-    const copied = context.renderer.copyToClipboardOSC52(selected)
-    setStatus(copied ? `Copied ${selected.length} characters` : "Could not reach the clipboard")
+    // The system clipboard is the one Ctrl+V reads back, so it is written
+    // first; OSC 52 covers terminals whose clipboard the OS does not own.
+    const written = writeClipboard(selected)
+    const osc = context.renderer.copyToClipboardOSC52(selected)
+    setStatus(written || osc ? `Copied ${selected.length} characters` : "Could not reach the clipboard")
   }
 
   /**
-   * The clipboard is only writable through OpenTUI (`copyToClipboardOSC52`),
-   * so pasting reads the OS clipboard directly. Ctrl+V is claimed before the
-   * textarea: the host's `prompt.paste` belongs to the chat prompt, not here.
+   * The clipboard has two halves: the OS one (readable through a platform
+   * tool, writable through `writeClipboard`) and OpenTUI's OSC 52 one. Both are
+   * used in both directions, so a copy survives either the terminal or the OS.
+   * Ctrl+V is claimed before the textarea: the host's `prompt.paste` belongs to
+   * the chat prompt, not here.
    */
   const readClipboard = (): string | undefined => {
     const options = { encoding: "utf8" as const, timeout: 3000, windowsHide: true }
@@ -516,6 +569,30 @@ function Note(props: NoteProps) {
       }
     } catch {
       return undefined
+    }
+  }
+
+  /** Writes the selection to the system clipboard; `false` when no tool answered. */
+  const writeClipboard = (text: string): boolean => {
+    const options = { input: text, encoding: "utf8" as const, timeout: 3000, windowsHide: true }
+    try {
+      if (process.platform === "win32") {
+        execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard"], options)
+        return true
+      }
+      if (process.platform === "darwin") {
+        execFileSync("pbcopy", [], options)
+        return true
+      }
+      try {
+        execFileSync("wl-copy", [], options)
+        return true
+      } catch {
+        execFileSync("xclip", ["-selection", "clipboard", "-i"], options)
+        return true
+      }
+    } catch {
+      return false
     }
   }
 
@@ -590,6 +667,7 @@ function Note(props: NoteProps) {
     setStatus("")
     setDialogValue(emptyDialog())
     setDialog({ kind })
+    startCaret()
     queueMicrotask(() => {
       if (area) {
         area.blur()
@@ -603,6 +681,7 @@ function Note(props: NoteProps) {
   function closeDialog() {
     if (dialog() === null) return
     setDialog(null)
+    stopCaret()
     setStatus("")
     queueMicrotask(() => {
       if (area) area.focusable = true
@@ -843,25 +922,34 @@ function Note(props: NoteProps) {
       if (guardedTab()) focusButtons()
       return
     }
-    if (key.name === "return" || key.name === "kpenter" || key.name === "enter") {
+    if (key.name === "return" || key.name === "kpenter" || key.name === "enter" || key.name === "linefeed") {
       key.preventDefault()
       // A new line, plus the configured indent when Ctrl was held. Both this
       // path and the keymap command go through `guardedNewline`, because the
-      // host delivers one physical Enter to both.
-      if (guardedNewline()) addNewline(key.ctrl === true)
+      // host delivers one physical Enter to both. `linefeed` counts as the
+      // Ctrl variant: a terminal without the kitty protocol reports Ctrl+Enter
+      // as LF, which is the only difference it can express.
+      if (guardedNewline()) addNewline(key.ctrl === true || key.name === "linefeed")
       return
     }
-    if (key.name === "pageup") {
+    if (PAGE_UP_NAMES.has(key.name)) {
       key.preventDefault()
-      movePage(-1, key.shift)
+      movePage(-1, key.shift === true)
       return
     }
-    if (key.name === "pagedown") {
+    if (PAGE_DOWN_NAMES.has(key.name)) {
       key.preventDefault()
-      movePage(1, key.shift)
+      movePage(1, key.shift === true)
       return
     }
     if (key.name === "c" && key.ctrl) {
+      key.preventDefault()
+      copySelection()
+      return
+    }
+    // Ctrl+Insert is the POSIX copy, and the key most terminals leave intact
+    // for the application (`ctrl+shift+c` is the copy the terminal keeps).
+    if ((key.name === "insert" || key.name === "kpinsert") && key.ctrl) {
       key.preventDefault()
       copySelection()
       return
@@ -908,8 +996,23 @@ function Note(props: NoteProps) {
       // Enter belongs to the note, but OpenCode binds a bare `return` to
       // `input.submit` for the focused editor and consumes it before the
       // textarea sees it. Claiming it here (higher priority) restores the
-      // newline; Ctrl+Return stays the indented variant.
+      // newline. Ctrl+Return is the indented variant and is bound to
+      // `input.newline` in the host, so it is claimed at the same priority —
+      // otherwise the host inserts its newline with no indentation.
       { id: "opencode-note.editor.newline", bind: NEWLINE_BIND, run: () => { if (guardedNewline()) addNewline(false) } },
+      {
+        id: "opencode-note.editor.indent-newline",
+        bind: "ctrl+return,linefeed",
+        run: () => { if (guardedNewline()) addNewline(true) },
+      },
+      // PageUp/PageDown are bound to the message list by the host; the note
+      // claims both forms so a page move lands in the editor, with the
+      // selection when Shift is held.
+      { id: "opencode-note.editor.page-up", bind: "pageup", run: () => movePage(-1, false) },
+      { id: "opencode-note.editor.page-down", bind: "pagedown", run: () => movePage(1, false) },
+      { id: "opencode-note.editor.select-page-up", bind: "shift+pageup", run: () => movePage(-1, true) },
+      { id: "opencode-note.editor.select-page-down", bind: "shift+pagedown", run: () => movePage(1, true) },
+      { id: "opencode-note.editor.copy", bind: "ctrl+c,ctrl+insert", run: () => copySelection() },
     ],
   }))
 
@@ -971,6 +1074,7 @@ function Note(props: NoteProps) {
   }
 
   let rootBox: BoxRenderable | undefined
+  let titleLine: TextRenderable | undefined
   let panelBox: BoxRenderable | undefined
   let buttonBar: TextRenderable | undefined
   let hintLine: TextRenderable | undefined
@@ -1019,6 +1123,16 @@ function Note(props: NoteProps) {
     buttonBar.content = styled(runs)
   }
 
+  /**
+   * The title sits *in* the top border rather than on its own row: inverted
+   * chrome (the border's ink as the background, the panel's background as the
+   * text) is what separates it from the note's body text.
+   */
+  const syncTitle = () => {
+    if (!titleLine) return
+    titleLine.content = styled([{ text: ` ${header()} `, fg: colors.panel, bg: colors.border }])
+  }
+
   const syncHint = () => {
     if (!hintLine) return
     const message = status() || hints()
@@ -1026,8 +1140,53 @@ function Note(props: NoteProps) {
     hintLine.fg = status() ? colors.accent : colors.faint
   }
 
+  /**
+   * The dialog is a box over the panel, centred, never wider than 72 columns
+   * and never wider than the panel itself.
+   */
   const dialogWidth = () =>
-    Math.max(1, Math.min(Math.max(1, innerWidth() - 2), Math.max(40, Math.floor(size().width * 0.6))))
+    Math.max(1, Math.min(Math.max(1, innerWidth() - 2), Math.max(40, Math.floor(size().width * 0.6)), 72))
+
+  /**
+   * The dialog's one input row: a tinted bar (the border ink, so it reads as
+   * chrome rather than text) with a blinking block at the caret.
+   */
+  const inputRow = (placeholder: string) => {
+    const width = Math.max(1, dialogWidth() - 4)
+    const { text, caret } = dialogValue()
+    const at = Math.max(0, Math.min(text.length, caret))
+    const runs: Array<{ text: string; fg?: unknown; bg?: unknown }> = [{ text: "> ", fg: colors.accent, bg: colors.border }]
+    let used = 2
+    if (!text) {
+      runs.push({ text: " ", fg: colors.panel, bg: caretOn() ? colors.accent : colors.border })
+      used += 1
+      for (const char of placeholder) {
+        if (used >= width) break
+        runs.push({ text: char, fg: colors.faint, bg: colors.border })
+        used += 1
+      }
+    } else {
+      const head = text.slice(0, at)
+      if (head) {
+        runs.push({ text: head, fg: colors.text, bg: colors.border })
+        used += head.length
+      }
+      const glyph = text.charAt(at) || " "
+      runs.push(
+        caretOn()
+          ? { text: glyph, fg: colors.panel, bg: colors.accent }
+          : { text: glyph, fg: colors.text, bg: colors.border },
+      )
+      used += 1
+      const tail = text.slice(at + 1)
+      if (tail) {
+        runs.push({ text: tail, fg: colors.text, bg: colors.border })
+        used += tail.length
+      }
+    }
+    if (used < width) runs.push({ text: " ".repeat(width - used), bg: colors.border })
+    return styled(runs)
+  }
 
   const syncDialog = () => {
     const state = dialog()
@@ -1042,11 +1201,8 @@ function Note(props: NoteProps) {
     dialogBox.left = Math.max(0, Math.floor((size().width - width) / 2))
     if (dialogTitle) dialogTitle.content = spec.title
     if (dialogDirectory) dialogDirectory.content = context.ui.format.path(directory)
-    const value = dialogValue().text
     if (dialogInput) {
-      dialogInput.content = value
-        ? styled([{ text: "> ", fg: colors.accent }, { text: value, fg: colors.text }])
-        : styled([{ text: "> ", fg: colors.accent }, { text: spec.placeholder, fg: colors.faint }])
+      dialogInput.content = inputRow(spec.placeholder)
     }
     if (dialogHint) {
       // A message from the last attempt ("Nothing to load…") takes the row;
@@ -1073,6 +1229,7 @@ function Note(props: NoteProps) {
 
   function sync() {
     syncSize()
+    syncTitle()
     syncButtons()
     syncHint()
     syncDialog()
@@ -1105,7 +1262,16 @@ function Note(props: NoteProps) {
         paddingLeft={1}
         paddingRight={1}
       >
-        <text wrapMode="none" content={header()} fg={colors.accent} />
+        <text
+          ref={(node: TextRenderable) => {
+            titleLine = node
+          }}
+          position="absolute"
+          top={-1}
+          left={2}
+          wrapMode="none"
+          content=""
+        />
         <textarea
           ref={(node: TextareaRenderable) => {
             area = node
