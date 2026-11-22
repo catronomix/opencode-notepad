@@ -2,8 +2,9 @@
 
 A per-chat scratchpad for the OpenCode terminal UI. Press `/note` (or the palette
 command) and a near-fullscreen editor opens over the chat: write, mark a
-selection, wrap it in Markdown, save it to a file, or hand it to the model — all
-without the note ever entering the chat transcript.
+selection, wrap it in Markdown, save it to a file, or hand it to the model. The
+note is never written into a session message, and it stays out of the chat
+context unless you insert it or send it to a model (see [Privacy](#privacy)).
 
 Each chat has its own note. Notes keyed by session live in the plugin's durable
 store on disk, not in the conversation, so they survive restarts and never cost
@@ -11,7 +12,10 @@ context.
 
 Loading a file is bounded: anything that is not a regular file, is larger than
 1 MiB, or contains NUL bytes is refused with a status line and an error toast,
-and the note is left exactly as it was.
+and the note is left exactly as it was. The note itself is held to the same 1
+MiB: a paste that would grow past it is refused, and text that grows past it is
+kept in the editor but not written to the store, with the same status line and
+toast.
 
 ## Install
 
@@ -83,11 +87,26 @@ The bracketed letter is the shortcut — pressing it presses the button.
 | `[b]tw`    | answer the note as a side question, with the chat as context, and append   |
 
 `Format` and `Btw` use the stateless generation endpoint: the request never
-belongs to a session, so the note never leaks into the transcript and the answer
-never appears as an assistant turn. `Btw` reads the session's messages through
-the client API and inlines them into the prompt instead, as the first block -
-the conversation stays a stable prefix, then the note, then the instruction -
-so provider prompt caching keeps working across questions.
+belongs to a session, so the answer never appears as an assistant turn and no
+session message is created. They are model calls, not local operations — see
+[Privacy](#privacy). `Btw` reads the session's messages through the client API
+and inlines them into the prompt, as the first block - the conversation stays a
+stable prefix, then the note, then the instruction - so provider prompt caching
+keeps working across questions.
+
+## Privacy
+
+The note is stored outside the chat, but it is not hidden from everything:
+
+- `Insert` moves the note (or the selection) into the chat input. From there it
+  becomes part of a message and is sent to the model like any other prompt.
+- `Format` sends the note text to the configured provider and replaces the note
+  with the answer.
+- `Btw` sends the note **and the chat transcript** to the configured provider,
+  because the transcript is what the side question is asked against.
+
+Neither call creates a session message, and the note never enters the chat
+context by itself; the transmissions above are the requests themselves.
 
 ## Notes and limits
 
@@ -112,7 +131,12 @@ so provider prompt caching keeps working across questions.
   owns the keyboard — the note's textarea is blurred and not focusable.
 - A brand-new chat has no session yet; opening the note commits one through the
   API (no prompt, no model call) so the note has somewhere stable to live.
-- Deleting a chat deletes its note.
+- Deleting a chat empties its note record. The record itself stays on disk as an
+  empty store file: the TUI storage API can read, write and overwrite a key but
+  has no `remove`, so one (empty) file per session is retained. Notes written
+  under the old, lossy key layout are copied into the reversible key the first
+  time their session is opened, and the old record is emptied the same way —
+  only for session IDs the old encoding could represent without loss.
 - **Known limitation: clipboard keys on Windows terminals.** Copy writes the
   selection to the Windows clipboard (`Set-Clipboard`, with OSC 52 alongside it)
   and paste reads that clipboard back (with OSC 52 as the fallback), so the two

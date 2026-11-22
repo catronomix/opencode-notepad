@@ -62,3 +62,13 @@ export function noteKey(sessionID: string): string {
 export function legacyNoteKey(sessionID: string): string {
   return `${NOTE_KEY_PREFIX}.${storageSegment(sessionID)}`
 }
+
+/**
+ * Whether a session's old-key record can be trusted to belong to it. The old
+ * segment was lossy (`a:b` and `a-b` both encoded to `a-b`), so a key that did
+ * not survive the round trip could name a different chat and must be left
+ * alone. Real session IDs (`ses_…`) pass unchanged.
+ */
+export function canMigrateLegacy(sessionID: string): boolean {
+  return storageSegment(sessionID) === sessionID
+}

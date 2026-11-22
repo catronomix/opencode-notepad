@@ -29,7 +29,7 @@ import { execFileSync } from "node:child_process"
 
 import { indentFor, insertNewline, leadingWhitespace, pageRows, printable, selectionAfterWrap, shade, wrapSelection, wrapperFor } from "./editor.ts"
 import { btwRequest, formatRequest, transcriptOf } from "./llm.ts"
-import { legacyNoteKey, listPathMatches, noteKey, readNoteFile, resolveNotePath, writeNoteFile } from "./note.ts"
+import { MAX_NOTE_BYTES, NOTE_TOO_LARGE, canMigrateLegacy, legacyNoteKey, listPathMatches, noteKey, noteTooLarge, readNoteFile, resolveNotePath, writeNoteFile, type PathMatch } from "./note.ts"
 import {
   DIALOG_HEIGHT,
   DIALOG_MATCH_ROWS,
@@ -123,42 +123,63 @@ export default Plugin.define({
       return found[found.length - 1]
     }
 
+    /**
+     * Opens the page. Never rejects: the keymap command returns its promise to
+     * the host, so every failure (route, location, session creation) is caught
+     * here and reported instead of becoming an unhandled rejection.
+     */
     const open = async () => {
-      const current = context.ui.router.current()
-      if (current.type === "plugin" && current.name === PAGE) return
-      const tabs = context.ui.tabs.enabled() ? context.ui.tabs.list() : []
-      const activeTab = tabs.find((tab) => tab.active)?.sessionID
-      // The host moves to this page before the command runs, so the route under
-      // it is not available here. The tab bar is: an active tab is the chat on
-      // screen, no active tab is the home screen.
-      const origin: Route = activeTab ? { type: "session", sessionID: activeTab } : { type: "home" }
-      let sessionID = activeTab
-      let created = false
-      // Files resolve against the chat's own working directory, never against
-      // `process.cwd()` (which is only the directory the TUI was launched in).
-      // The host publishes that directory as a `LocationRef`: the session record
-      // carries it per chat, `context.location` for the screen being shown, and
-      // `data.location.default()` for the project. Read, in that order.
-      const projectDirectory = () => context.location?.directory ?? context.data.location.default().directory
-      let directory = sessionID
-        ? (context.data.session.get(sessionID)?.location.directory ?? projectDirectory())
-        : projectDirectory()
-      if (!sessionID) {
-        // A brand-new chat has no session yet. Committing one through the API
-        // (no prompt, no model call) is what gives the note a stable home. Its
-        // tab is deliberately not focused: closing goes home, never to it.
-        try {
-          const session = await context.client.session.create({ location: { directory } })
-          sessionID = session.id
-          created = true
-          directory = session.location.directory || directory
-        } catch (error) {
-          context.ui.toast.show({ title: "Note", message: `Could not start a session: ${messageOf(error)}`, variant: "error" })
-          return
+      try {
+        const current = context.ui.router.current()
+        if (current.type === "plugin" && current.name === PAGE) return
+        const tabs = context.ui.tabs.enabled() ? context.ui.tabs.list() : []
+        const activeTab = tabs.find((tab) => tab.active)?.sessionID
+        // The host moves to this page before the command runs, so the route under
+        // it is not available here. The tab bar is: an active tab is the chat on
+        // screen, no active tab is the home screen.
+        const origin: Route = activeTab ? { type: "session", sessionID: activeTab } : { type: "home" }
+        let sessionID = activeTab
+        let created = false
+        // Files resolve against the chat's own working directory, never against
+        // `process.cwd()` (which is only the directory the TUI was launched in).
+        // The host publishes that directory as a `LocationRef`: the session record
+        // carries it per chat, `context.location` for the screen being shown, and
+        // `data.location.default()` for the project. Read, in that order.
+        const projectDirectory = (): string => {
+          try {
+            return context.location?.directory ?? context.data.location.default().directory
+          } catch {
+            return process.cwd()
+          }
         }
+        let directory = projectDirectory()
+        if (sessionID) {
+          try {
+            directory = context.data.session.get(sessionID)?.location.directory ?? directory
+          } catch {
+            // The session record is a convenience: the project directory will do.
+          }
+        }
+        if (!sessionID) {
+          // A brand-new chat has no session yet. Committing one through the API
+          // (no prompt, no model call) is what gives the note a stable home. Its
+          // tab is deliberately not focused: closing goes home, never to it.
+          try {
+            const session = await context.client.session.create({ location: { directory } })
+            sessionID = session.id
+            created = true
+            directory = session.location.directory || directory
+          } catch (error) {
+            context.ui.toast.show({ title: "Note", message: `Could not start a session: ${messageOf(error)}`, variant: "error" })
+            return
+          }
+        }
+        page = { sessionID, created, origin, directory }
+        context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created, directory } })
+      } catch (error) {
+        console.error("opencode-notepad: could not open the note", messageOf(error))
+        context.ui.toast.show({ title: "Note", message: `Could not open the note: ${messageOf(error)}`, variant: "error" })
       }
-      page = { sessionID, created, origin, directory }
-      context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created, directory } })
     }
 
     /**
@@ -193,7 +214,7 @@ export default Plugin.define({
               target.insertText(insert)
               return
             } catch (error) {
-              console.error("opencode-notepad: could not insert into the chat input", error)
+              console.error("opencode-notepad: could not insert into the chat input", messageOf(error))
               context.ui.toast.show({ title: "Note", message: `Could not insert the note: ${messageOf(error)}`, variant: "error" })
               return
             }
@@ -233,15 +254,21 @@ export default Plugin.define({
     })
 
     // Deleting a chat deletes its note. The note never leaves the plugin's
-    // durable store, so clearing the key is the whole cleanup.
+    // durable store, so clearing the key is the whole cleanup. The mutator
+    // returns a promise: it is caught here, because a rejected write must not
+    // surface as an unhandled rejection in the host.
     const stop = context.data.on("session.deleted", (event) => {
+      const failed = (error: unknown) =>
+        console.error("opencode-notepad: could not clear the note of a deleted session", messageOf(error))
       try {
         const [, set] = context.storage.store(noteKey(event.data.sessionID), { initial: { text: "" } })
-        void set((draft) => {
-          draft.text = ""
-        })
+        Promise.resolve(
+          set((draft) => {
+            draft.text = ""
+          }),
+        ).catch(failed)
       } catch (error) {
-        console.error("opencode-notepad: could not clear the note of a deleted session", error)
+        failed(error)
       }
     })
 
@@ -257,7 +284,7 @@ export default Plugin.define({
           bind: "ctrl+shift+n,alt+n",
           palette: true,
           slash: { name: "note" },
-          run: () => void open(),
+          run: () => open(),
         },
       ],
     }))
@@ -280,6 +307,16 @@ interface NoteProps {
 
 function Note(props: NoteProps) {
   const context = props.context
+  /** Set when the host disposes the page: nothing may touch its renderables after. */
+  let disposed = false
+  onCleanup(() => {
+    disposed = true
+    abort?.abort()
+  })
+  /** Set once the view has decided to leave, so a second delivery is ignored. */
+  let closing = false
+  /** The page is leaving or gone: status lines and repaints are pointless now. */
+  const settling = () => disposed || closing
   const theme = context.theme
   const colors = {
     background: theme.background.base,
@@ -328,31 +365,13 @@ function Note(props: NoteProps) {
   onCleanup(() => context.renderer.off("resize", onResize))
 
   const [stored, update] = context.storage.store(noteKey(props.sessionID), { initial: { text: "" } })
-  // Migration: notes written before the keys became reversible live under the
-  // old, lossy key. The text is copied into the new key and the old record is
-  // emptied, once, the first time a session is opened with an empty new note.
-  // The host's TUI storage has no `remove`, so the old record cannot be deleted;
-  // emptying it is the closest the API allows (see README).
-  let migratedText = ""
-  if (!stored.text) {
-    const [legacy, setLegacy] = context.storage.store(legacyNoteKey(props.sessionID), { initial: { text: "" } })
-    if (legacy.text) {
-      migratedText = legacy.text
-      void update((draft) => {
-        draft.text = migratedText
-      })
-      void setLegacy((draft) => {
-        draft.text = ""
-      })
-    }
-  }
-  const initialText = stored.text || migratedText
   const indent = indentFor(context.options.indent)
 
   const [_mode, _setMode] = createSignal<"editor" | "buttons">("editor")
   const [_cursor, _setCursor] = createSignal(0)
   const [_dialog, _setDialog] = createSignal<{ readonly kind: "save" | "load" } | null>(null)
   const [_dialogText, _setDialogText] = createSignal<DialogState>(emptyDialog())
+  const [_matches, _setMatches] = createSignal<PathMatch[]>([])
   const [_status, _setStatus] = createSignal("")
   const [_caretOn, _setCaretOn] = createSignal(true)
   const [_busy, _setBusy] = createSignal<{ readonly kind: "format" | "btw"; readonly label: string } | null>(null)
@@ -383,6 +402,8 @@ function Note(props: NoteProps) {
     sync()
   }
   const setStatus = (value: string) => {
+    // The page is leaving or gone: no repaint, no timer, no toast target.
+    if (settling()) return
     clearTimeout(statusTimer)
     _setStatus(value)
     sync()
@@ -399,11 +420,64 @@ function Note(props: NoteProps) {
   }
 
   let area: TextareaRenderable | undefined
-  let latest = initialText
   let abort: AbortController | undefined
   let saveTimer: ReturnType<typeof setTimeout> | undefined
   let statusTimer: ReturnType<typeof setTimeout> | undefined
   onCleanup(() => clearTimeout(statusTimer))
+
+  /** One status line and one toast for a write that did not reach the store. */
+  const reportSaveFailure = (error: unknown) => {
+    if (settling()) return
+    console.error("opencode-notepad: could not save the note", messageOf(error))
+    setStatus("Could not save the note")
+    context.ui.toast.show({ title: "Note", message: "Could not save the note", variant: "error" })
+  }
+
+  /**
+   * Writes the note into the durable store. The host's mutator returns a
+   * promise, and its rejection is caught here so it can never become an
+   * unhandled one. The text stays in memory either way, so the next keystroke
+   * retries the write.
+   */
+  const saveNote = (value: string) => {
+    try {
+      Promise.resolve(
+        update((draft) => {
+          draft.text = value
+        }),
+      ).catch(reportSaveFailure)
+    } catch (error) {
+      reportSaveFailure(error)
+    }
+  }
+
+  // Migration: notes written before the keys became reversible live under the
+  // old, lossy key. The text is copied into the new key and the old record is
+  // emptied, once, the first time a session is opened with an empty new note.
+  // Only a session ID the old segment encoded without loss is migrated: for any
+  // other ID the old key could name a different chat, so it is left alone. The
+  // host's TUI storage has no `remove`, so an old record cannot be deleted;
+  // emptying it is the closest the API allows (see README).
+  let migratedText = ""
+  if (!stored.text && canMigrateLegacy(props.sessionID)) {
+    try {
+      const [legacy, setLegacy] = context.storage.store(legacyNoteKey(props.sessionID), { initial: { text: "" } })
+      if (legacy.text) {
+        migratedText = legacy.text
+        saveNote(migratedText)
+        Promise.resolve(
+          setLegacy((draft) => {
+            draft.text = ""
+          }),
+        ).catch((error) => console.error("opencode-notepad: could not empty the old note record", messageOf(error)))
+      }
+    } catch (error) {
+      console.error("opencode-notepad: could not migrate the old note", messageOf(error))
+    }
+  }
+  const initialText = stored.text || migratedText
+  let latest = initialText
+  let overLimitNotified = false
 
   // The dialog's caret is its focus indicator, so it blinks only while the
   // dialog is open and stops with it.
@@ -425,37 +499,80 @@ function Note(props: NoteProps) {
 
   // The chat's working directory, captured when the page opened. Save and Load
   // resolve against this, never against the TUI process's cwd.
-  const directory = props.directory || context.location?.directory || context.data.location.default().directory
+  const directory =
+    props.directory ||
+    context.location?.directory ||
+    (() => {
+      try {
+        return context.data.location.default().directory
+      } catch {
+        return process.cwd()
+      }
+    })()
 
   /** Current note text: the buffer once it exists, the store before that. */
   const currentText = () => area?.plainText ?? latest
 
-  const flush = () => {
+  /** The reason + user-visible wording every cap refusal shares. */
+  const refuseTooLarge = (action: "save" | "paste") => {
+    const message = `Cannot ${action === "paste" ? "paste" : "save the note"}: ${NOTE_TOO_LARGE}`
+    setStatus(message)
+    context.ui.toast.show({ title: "Note", message, variant: "error" })
+  }
+
+  const flush = (notify = true) => {
     clearTimeout(saveTimer)
     const value = latest
-    void update((draft) => {
-      draft.text = value
-    })
+    // The note never grows past the cap in the store: the text stays in the
+    // editor, so the user can cut it down and the next write goes through.
+    if (noteTooLarge(value)) {
+      if (notify && !overLimitNotified) {
+        overLimitNotified = true
+        refuseTooLarge("save")
+      }
+      return
+    }
+    overLimitNotified = false
+    saveNote(value)
   }
 
   const persist = () => {
-    if (!area) return
+    if (!area || disposed) return
     latest = area.plainText
     clearTimeout(saveTimer)
-    saveTimer = setTimeout(flush, 200)
+    if (noteTooLarge(latest)) {
+      // Typing past the cap: say it once, keep the text, write nothing.
+      if (!overLimitNotified) {
+        overLimitNotified = true
+        refuseTooLarge("save")
+      }
+      return
+    }
+    overLimitNotified = false
+    saveTimer = setTimeout(() => flush(false), 200)
   }
 
-  onCleanup(() => flush())
+  onCleanup(() => flush(false))
 
   /** Replaces the whole buffer (load, clear, format, btw) and persists it. */
   const applyText = (value: string) => {
+    if (disposed) return
     latest = value
     area?.setText(value)
-    void update((draft) => {
-      draft.text = value
-    })
+    if (noteTooLarge(value)) {
+      if (!overLimitNotified) {
+        overLimitNotified = true
+        refuseTooLarge("save")
+      }
+    } else {
+      overLimitNotified = false
+      saveNote(value)
+    }
     setMode("editor")
-    queueMicrotask(() => area?.focus())
+    queueMicrotask(() => {
+      if (disposed) return
+      area?.focus()
+    })
   }
 
   // ---- guard against a key being handled twice (keymap layer + renderable) --
@@ -466,8 +583,6 @@ function Note(props: NoteProps) {
    * A short window keeps it a single newline without swallowing a second press.
    */
   let newlineGuard = 0
-  /** Set once the view has decided to leave, so a second delivery is ignored. */
-  let closing = false
   /**
    * When the dialog settled the last key. Only that one press is suppressed
    * elsewhere: the dialog's Enter must not also insert a newline, and the
@@ -490,21 +605,24 @@ function Note(props: NoteProps) {
   }
 
   const focusEditor = () => {
+    if (settling()) return
     setMode("editor")
     queueMicrotask(() => {
+      if (disposed) return
       area?.focus()
       sync()
     })
   }
 
   const focusButtons = () => {
+    if (settling()) return
     setMode("buttons")
     area?.blur()
     sync()
   }
 
   const close = () => {
-    flush()
+    flush(false)
     props.close()
   }
 
@@ -594,7 +712,15 @@ function Note(props: NoteProps) {
    * the chat prompt, not here.
    */
   const readClipboard = (): string | undefined => {
-    const options = { encoding: "utf8" as const, timeout: 3000, windowsHide: true }
+    // The default pipe buffer is 1 MiB, which a paste-sized clipboard can
+    // fill on its own; give the reader room to answer with the whole text so
+    // the cap check, not a pipe error, decides whether the paste is allowed.
+    const options = {
+      encoding: "utf8" as const,
+      timeout: 5000,
+      windowsHide: true,
+      maxBuffer: MAX_NOTE_BYTES * 2 + 64 * 1024,
+    }
     try {
       if (process.platform === "win32") {
         return execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"], options)
@@ -645,7 +771,12 @@ function Note(props: NoteProps) {
       setStatus("The clipboard is empty")
       return
     }
-    area.insertText(text.replace(/\r\n/g, "\n").replace(/\n$/, ""))
+    const pasted = text.replace(/\r\n/g, "\n").replace(/\n$/, "")
+    if (noteTooLarge(currentText() + pasted)) {
+      refuseTooLarge("paste")
+      return
+    }
+    area.insertText(pasted)
     persist()
   }
 
@@ -692,10 +823,20 @@ function Note(props: NoteProps) {
   // Nothing a key does can reach the note behind it.
 
   const dialogQuery = () => dialogValue().text
-  const completions = () => (dialog() === null ? [] : dialogMatches(directory, dialogQuery()))
+
+  /**
+   * The completion list is built when the query changes, never from `sync()`:
+   * the dialog's caret blinks every 530 ms and each repaint used to re-read the
+   * directory off the render thread.
+   */
+  const refreshMatches = () => {
+    const state = dialog()
+    _setMatches(state === null ? [] : dialogMatches(directory, dialogValue().text))
+  }
 
   const setDialogValue = (state: DialogState) => {
     _setDialogText(state)
+    refreshMatches()
     sync()
   }
 
@@ -705,6 +846,7 @@ function Note(props: NoteProps) {
     setStatus("")
     setDialogValue(emptyDialog())
     setDialog({ kind })
+    refreshMatches()
     startCaret()
     queueMicrotask(() => {
       if (area) {
@@ -721,6 +863,7 @@ function Note(props: NoteProps) {
     setDialog(null)
     stopCaret()
     setStatus("")
+    refreshMatches()
     queueMicrotask(() => {
       if (area) area.focusable = true
       // Focus and the page's mode must move together: the mode signal is what
@@ -810,69 +953,91 @@ function Note(props: NoteProps) {
   }
 
   const modelRef = () => {
-    const current = context.ui.model.current()
-    if (!current) return undefined
-    return current.variant
-      ? { id: current.modelID, providerID: current.providerID, variant: current.variant }
-      : { id: current.modelID, providerID: current.providerID }
+    try {
+      const current = context.ui.model.current()
+      if (!current) return undefined
+      return current.variant
+        ? { id: current.modelID, providerID: current.providerID, variant: current.variant }
+        : { id: current.modelID, providerID: current.providerID }
+    } catch (error) {
+      console.error("opencode-notepad: could not read the current model", messageOf(error))
+      return undefined
+    }
   }
 
   /**
    * Runs one stateless model call. The request never belongs to a session, so
    * neither the note nor the answer can end up in the chat context.
+   *
+   * Never rejects: its callers hand it to the host, and the reporting in the
+   * catch block plus the cleanup in `finally` are guarded so a failure there
+   * cannot become a second, unhandled rejection. A page that is closing or gone
+   * aborts the call instead of painting its result.
    */
   async function withModel(kind: "format" | "btw", label: string, work: (signal: AbortSignal) => Promise<string>) {
-    if (busy()) return
+    if (busy() || disposed) return
     const controller = new AbortController()
     abort = controller
-    area?.blur()
-    setStatus("")
-    setBusy({ kind, label })
     try {
+      area?.blur()
+      setStatus("")
+      setBusy({ kind, label })
       const value = await work(controller.signal)
+      if (disposed) return
       applyText(value)
       setStatus(kind === "format" ? "Formatted" : "Answered")
     } catch (error) {
-      if (controller.signal.aborted) setStatus("Cancelled")
-      else {
-        setStatus(`Failed: ${messageOf(error)}`)
-        context.ui.toast.show({
-          title: kind === "format" ? "Format failed" : "Btw failed",
-          message: messageOf(error),
-          variant: "error",
-        })
+      if (disposed) return
+      try {
+        if (controller.signal.aborted) setStatus("Cancelled")
+        else {
+          setStatus(`Failed: ${messageOf(error)}`)
+          context.ui.toast.show({
+            title: kind === "format" ? "Format failed" : "Btw failed",
+            message: messageOf(error),
+            variant: "error",
+          })
+        }
+      } catch (reporting) {
+        console.error("opencode-notepad: could not report a failed model call", messageOf(reporting))
       }
     } finally {
       abort = undefined
-      setBusy(null)
-      focusEditor()
+      try {
+        if (!disposed) {
+          setBusy(null)
+          focusEditor()
+        }
+      } catch (cleanup) {
+        console.error("opencode-notepad: could not leave the busy state", messageOf(cleanup))
+      }
     }
   }
 
-  function formatNote() {
+  function formatNote(): void | Promise<void> {
     const source = currentText()
     if (!source.trim()) {
       setStatus("The note is empty")
       return
     }
-    void withModel("format", "Formatting…", async (signal) => {
+    return withModel("format", "Formatting…", async (signal) => {
       const result = await context.client.experimental.generate.text({ prompt: formatRequest(source), model: modelRef() }, { signal })
       return result.text.trim()
     })
   }
 
-  function askBtw() {
+  function askBtw(): void | Promise<void> {
     const question = currentText()
     if (!question.trim()) {
       setStatus("The note is empty")
       return
     }
-    void withModel("btw", "Answering…", async (signal) => {
+    return withModel("btw", "Answering…", async (signal) => {
       let conversation = ""
       try {
         conversation = transcriptOf(await context.client.session.context({ sessionID: props.sessionID }))
       } catch (error) {
-        console.error("opencode-notepad: could not read the chat context for /btw", error)
+        console.error("opencode-notepad: could not read the chat context for /btw", messageOf(error))
       }
       const result = await context.client.experimental.generate.text(
         { prompt: btwRequest(question, conversation), model: modelRef() },
@@ -891,7 +1056,7 @@ function Note(props: NoteProps) {
   const pressButton = (index: number) => {
     const button = BUTTONS[index]
     if (!button) return
-    const actions: Record<ButtonKey, () => void> = {
+    const actions: Record<ButtonKey, () => void | Promise<void>> = {
       i: insert,
       c: clearNote,
       s: () => openDialog("save"),
@@ -899,7 +1064,15 @@ function Note(props: NoteProps) {
       f: formatNote,
       b: askBtw,
     }
-    actions[button.key]()
+    try {
+      const running = actions[button.key]()
+      // A model call is the only action that returns a promise. It reports its
+      // own failures; the catch is the last line of defence against a rejection
+      // escaping into the host's key dispatch.
+      if (running) void running.catch((error) => console.error("opencode-notepad: model action failed", messageOf(error)))
+    } catch (error) {
+      console.error("opencode-notepad: could not run a button action", messageOf(error))
+    }
   }
 
   const pressKey = (letter: ButtonKey) => {
@@ -1260,7 +1433,7 @@ function Note(props: NoteProps) {
       dialogHint.content = status() || spec.hint
       dialogHint.fg = status() ? colors.accent : colors.faint
     }
-    const rows = completions().slice(0, matchRows.length)
+    const rows = _matches().slice(0, matchRows.length)
     matchRows.forEach((row, index) => {
       if (!row) return
       const match = rows[index]
@@ -1278,6 +1451,8 @@ function Note(props: NoteProps) {
   }
 
   function sync() {
+    // The host may have disposed the page: its renderables are gone.
+    if (disposed) return
     syncSize()
     syncTitle()
     syncButtons()
