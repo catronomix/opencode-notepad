@@ -1,8 +1,8 @@
 # opencode-notepad
 
-[![npm](https://img.shields.io/npm/v/@catronomix/opencode-notepad)](https://www.npmjs.com/package/@catronomix/opencode-notepad)
-[![license](https://img.shields.io/npm/l/@catronomix/opencode-notepad)](LICENSE)
-[![node](https://img.shields.io/node/v/@catronomix/opencode-notepad)](https://nodejs.org)
+[![npm](https://img.shields.io/npm/v/@catronomix/opencode-notepad?cacheSeconds=3600)](https://www.npmjs.com/package/@catronomix/opencode-notepad)
+[![license](https://img.shields.io/npm/l/@catronomix/opencode-notepad?cacheSeconds=3600)](LICENSE)
+[![node](https://img.shields.io/node/v/@catronomix/opencode-notepad?cacheSeconds=3600)](https://nodejs.org)
 
 A per-chat scratchpad for the OpenCode terminal UI. Press `/note` (or the palette
 command) and a near-fullscreen editor opens over the chat: write, mark a
@@ -27,17 +27,30 @@ typing and the store keeps the last note under the cap.
 The package has a server part (`.` → `src/index.ts`) and a TUI part
 (`./tui` → `src/tui.tsx`), so a single entry loads both.
 
+```sh
+opencode plugin add @catronomix/opencode-notepad
+```
+
+Or add it to `plugins` in `~/.config/opencode/opencode.jsonc` yourself:
+
 ```jsonc title="~/.config/opencode/opencode.jsonc"
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": [
-    // from a checkout, with options
-    { "package": "C:/GITHUB/opencode-notepad", "options": { "indent": 2 } },
-  ],
+  "plugins": ["@catronomix/opencode-notepad"],
 }
 ```
 
-`opencode plugin add @catronomix/opencode-notepad` works too once the package is published.
+### From a checkout
+
+Point the entry at the directory and pass options there:
+
+```jsonc
+{
+  "plugins": [
+    { "package": "C:/path/opencode-notepad", "options": { "indent": 2 } },
+  ],
+}
+```
 
 For a source-only install (OpenCode resolves `@opencode/plugin`, `@opentui/*`
 and `solid-js` from its own runtime), copy the flat sources into
