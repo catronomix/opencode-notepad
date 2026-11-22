@@ -15,7 +15,8 @@ Loading a file is bounded: anything that is not a regular file, is larger than
 and the note is left exactly as it was. The note itself is held to the same 1
 MiB: a paste that would grow past it is refused, and text that grows past it is
 kept in the editor but not written to the store, with the same status line and
-toast.
+toast — closing the page discards that text, since the toast already fired while
+typing and the store keeps the last note under the cap.
 
 ## Install
 

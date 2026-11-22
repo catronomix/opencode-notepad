@@ -67,7 +67,10 @@ export function legacyNoteKey(sessionID: string): string {
  * Whether a session's old-key record can be trusted to belong to it. The old
  * segment was lossy (`a:b` and `a-b` both encoded to `a-b`), so a key that did
  * not survive the round trip could name a different chat and must be left
- * alone. Real session IDs (`ses_…`) pass unchanged.
+ * alone. Round-tripping is not proof either: a surviving ID's record could
+ * still have been written by a different ID that mapped onto the same segment
+ * (`a:b` onto `a-b`). That is practically safe because host session IDs are
+ * `ses_…` and contain none of the characters the legacy encoding rewrites.
  */
 export function canMigrateLegacy(sessionID: string): boolean {
   return storageSegment(sessionID) === sessionID
