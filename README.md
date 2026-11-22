@@ -1,5 +1,9 @@
 # opencode-notepad
 
+[![npm](https://img.shields.io/npm/v/@catronomix/opencode-notepad)](https://www.npmjs.com/package/@catronomix/opencode-notepad)
+[![license](https://img.shields.io/npm/l/@catronomix/opencode-notepad)](LICENSE)
+[![node](https://img.shields.io/node/v/@catronomix/opencode-notepad)](https://nodejs.org)
+
 A per-chat scratchpad for the OpenCode terminal UI. Press `/note` (or the palette
 command) and a near-fullscreen editor opens over the chat: write, mark a
 selection, wrap it in Markdown, save it to a file, or hand it to the model. The
