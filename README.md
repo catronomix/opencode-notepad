@@ -9,6 +9,10 @@ Each chat has its own note. Notes keyed by session live in the plugin's durable
 store on disk, not in the conversation, so they survive restarts and never cost
 context.
 
+Loading a file is bounded: anything that is not a regular file, is larger than
+1 MiB, or contains NUL bytes is refused with a status line and an error toast,
+and the note is left exactly as it was.
+
 ## Install
 
 The package has a server part (`.` → `src/index.ts`) and a TUI part

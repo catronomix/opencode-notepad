@@ -7,15 +7,47 @@
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 
-export { NOTE_KEY_PREFIX, isStorageSegment, noteKey, storageSegment } from "./keys.ts"
+export { NOTE_KEY_PREFIX, decodeSessionID, encodeSessionID, isStorageSegment, legacyNoteKey, noteKey } from "./keys.ts"
+
+/** The largest file the note will load; anything bigger is refused. */
+export const MAX_NOTE_BYTES = 1024 * 1024
 
 /** Resolves a user-typed path against the project directory. */
 export function resolveNotePath(cwd: string, target: string): string {
   return isAbsolute(target) ? target : resolve(cwd, target)
 }
 
-export function readNoteFile(path: string): string {
-  return readFileSync(path, "utf8")
+/** A load that succeeded, or the reason it was refused (shown to the user). */
+export type NoteFileRead = { readonly ok: true; readonly text: string } | { readonly ok: false; readonly reason: string }
+
+/**
+ * Reads a file to load into the note, refusing anything that is not a small,
+ * regular, text file. The checks run in this order on purpose: `stat` rejects
+ * FIFOs and devices *before* they are opened (opening a FIFO would block
+ * forever), the size check keeps a huge file from being read at all, and the
+ * NUL scan keeps binary data out of the editor.
+ */
+export function readNoteFile(path: string): NoteFileRead {
+  let size: number
+  try {
+    const stats = statSync(path)
+    if (!stats.isFile()) return { ok: false, reason: "not a regular file" }
+    size = stats.size
+  } catch {
+    return { ok: false, reason: "file cannot be read" }
+  }
+  if (size > MAX_NOTE_BYTES) return { ok: false, reason: "file is larger than 1 MiB" }
+
+  let bytes: Buffer
+  try {
+    bytes = readFileSync(path)
+  } catch {
+    return { ok: false, reason: "file cannot be read" }
+  }
+  // The file may have grown between `stat` and the read.
+  if (bytes.length > MAX_NOTE_BYTES) return { ok: false, reason: "file is larger than 1 MiB" }
+  if (bytes.includes(0)) return { ok: false, reason: "looks like a binary file" }
+  return { ok: true, text: bytes.toString("utf8") }
 }
 
 export function writeNoteFile(path: string, text: string): string {

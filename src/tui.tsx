@@ -29,7 +29,7 @@ import { execFileSync } from "node:child_process"
 
 import { indentFor, insertNewline, leadingWhitespace, pageRows, printable, selectionAfterWrap, shade, wrapSelection, wrapperFor } from "./editor.ts"
 import { btwRequest, formatRequest, transcriptOf } from "./llm.ts"
-import { listPathMatches, noteKey, readNoteFile, resolveNotePath, writeNoteFile } from "./note.ts"
+import { legacyNoteKey, listPathMatches, noteKey, readNoteFile, resolveNotePath, writeNoteFile } from "./note.ts"
 import {
   DIALOG_HEIGHT,
   DIALOG_MATCH_ROWS,
@@ -328,7 +328,25 @@ function Note(props: NoteProps) {
   onCleanup(() => context.renderer.off("resize", onResize))
 
   const [stored, update] = context.storage.store(noteKey(props.sessionID), { initial: { text: "" } })
-  const initialText = stored.text
+  // Migration: notes written before the keys became reversible live under the
+  // old, lossy key. The text is copied into the new key and the old record is
+  // emptied, once, the first time a session is opened with an empty new note.
+  // The host's TUI storage has no `remove`, so the old record cannot be deleted;
+  // emptying it is the closest the API allows (see README).
+  let migratedText = ""
+  if (!stored.text) {
+    const [legacy, setLegacy] = context.storage.store(legacyNoteKey(props.sessionID), { initial: { text: "" } })
+    if (legacy.text) {
+      migratedText = legacy.text
+      void update((draft) => {
+        draft.text = migratedText
+      })
+      void setLegacy((draft) => {
+        draft.text = ""
+      })
+    }
+  }
+  const initialText = stored.text || migratedText
   const indent = indentFor(context.options.indent)
 
   const [_mode, _setMode] = createSignal<"editor" | "buttons">("editor")
@@ -733,14 +751,18 @@ function Note(props: NoteProps) {
   }
 
   function loadFile(path: string) {
-    try {
-      const text = readNoteFile(path)
-      closeDialog()
-      applyText(text)
-      setStatus(`Loaded ${context.ui.format.path(path)}`)
-    } catch {
-      setStatus(`Cannot read ${context.ui.format.path(path)}`)
+    const shown = context.ui.format.path(path)
+    const result = readNoteFile(path)
+    if (!result.ok) {
+      // The note is left as it was and the load dialog stays open, so a
+      // corrected path can be typed straight away.
+      setStatus(`Cannot load ${shown}: ${result.reason}`)
+      context.ui.toast.show({ title: "Note", message: `Cannot load ${shown}: ${result.reason}`, variant: "error" })
+      return
     }
+    closeDialog()
+    applyText(result.text)
+    setStatus(`Loaded ${shown}`)
   }
 
   function commitSave(query: string) {
