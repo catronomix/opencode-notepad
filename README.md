@@ -28,7 +28,7 @@ The package has a server part (`.` → `src/index.ts`) and a TUI part
 }
 ```
 
-`opencode plugin add opencode-notepad` works too once the package is published.
+`opencode plugin add @catronomix/opencode-notepad` works too once the package is published.
 
 For a source-only install (OpenCode resolves `@opencode/plugin`, `@opentui/*`
 and `solid-js` from its own runtime), copy the flat sources into
