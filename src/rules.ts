@@ -94,6 +94,27 @@ export function insertRoute(state: { readonly sessionID: string; readonly origin
 }
 
 /**
+ * A session the note created and whose chat has had no messages since. Only a
+ * note the page had to create a session for is flagged, and only for as long as
+ * that is still the case: the record survives a restart so a stale flag can
+ * never delete a chat the user has since used.
+ */
+export interface ChatlessFlag {
+  readonly sessionID: string
+  readonly flaggedAt: number
+}
+
+/** Flags one session, keeping one record per session. */
+export function flagFor(flags: readonly ChatlessFlag[], sessionID: string, at: number): readonly ChatlessFlag[] {
+  return [...flags.filter((flag) => flag.sessionID !== sessionID), { sessionID, flaggedAt: at }]
+}
+
+/** The flags without one session's record. */
+export function withoutFlag(flags: readonly ChatlessFlag[], sessionID: string): readonly ChatlessFlag[] {
+  return flags.filter((flag) => flag.sessionID !== sessionID)
+}
+
+/**
  * Enter's binding in the page's own keymap layer. OpenCode binds a bare
  * `return` to `input.submit` for every focused edit buffer and consumes it
  * before the textarea can insert a newline; `input_newline` is bound only to

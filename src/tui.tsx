@@ -24,10 +24,11 @@ import {
 } from "@opentui/core"
 import type { Context, Route } from "@opencode/plugin/tui/context"
 import { Plugin } from "@opencode/plugin/tui"
-import { createSignal, onCleanup } from "solid-js"
+import { createEffect, createRoot, createSignal, onCleanup } from "solid-js"
 import { execFileSync } from "node:child_process"
 
 import { indentFor, insertNewline, leadingWhitespace, pageRows, printable, selectionAfterWrap, shade, wrapSelection, wrapperFor } from "./editor.ts"
+import { FLAGS_KEY } from "./keys.ts"
 import { btwRequest, formatRequest, transcriptOf } from "./llm.ts"
 import { MAX_NOTE_BYTES, NOTE_TOO_LARGE, canMigrateLegacy, legacyNoteKey, listPathMatches, noteKey, noteTooLarge, readNoteFile, resolveNotePath, writeNoteFile, type PathMatch } from "./note.ts"
 import {
@@ -41,11 +42,14 @@ import {
   dialogSpec,
   emptyDialog,
   escapeTarget,
+  flagFor,
   insertRoute,
   loadPlan,
   panelWidth,
   returnRoute,
   saveTarget,
+  withoutFlag,
+  type ChatlessFlag,
   type DialogState,
 } from "./rules.ts"
 
@@ -176,9 +180,99 @@ export default Plugin.define({
         }
         page = { sessionID, created, origin, directory }
         context.ui.router.navigate({ type: "plugin", name: PAGE, data: { sessionID, created, directory } })
+        // A flag whose chat is gone is not worth a question later. Checked here
+        // because the server is connected by the time a command can run.
+        void pruneFlags()
       } catch (error) {
         console.error("opencode-notepad: could not open the note", messageOf(error))
         context.ui.toast.show({ title: "Note", message: `Could not open the note: ${messageOf(error)}`, variant: "error" })
+      }
+    }
+
+    // ---- chat-less note sessions -------------------------------------------
+    //
+    // A note opened on the home screen has to create the session it belongs to
+    // (the note needs a storage key). Closing an empty note removes it again;
+    // closing a note with text lands in its chat and flags that chat, because
+    // it has no messages yet: only the note lives there. The plugin API has no
+    // tab-close hook (`ui.tabs` exposes `enabled/list/open/focus/move/close`
+    // only), so the question "did the user close that tab?" is answered by
+    // watching `tabs.list()` for the session disappearing. The flags are
+    // durable, so a restart cannot make a stale flag delete a chat the user has
+    // since used.
+
+    const [flags, updateFlags] = context.storage.store(FLAGS_KEY, { initial: { pending: [] as ChatlessFlag[] } })
+    /** Flags written before this run: the only ones that can be stale. */
+    const openedAt = Date.now()
+
+    /** Persists the whole flag list. Never rejects: a failed write is reported. */
+    const saveFlags = async (next: readonly ChatlessFlag[]) => {
+      try {
+        await updateFlags((draft) => {
+          draft.pending = next.map((flag) => ({ ...flag }))
+        })
+      } catch (error) {
+        console.error("opencode-notepad: could not save the chat-less chat flags", messageOf(error))
+        context.ui.toast.show({
+          title: "Note",
+          message: `Could not save the chat-less chat flags: ${messageOf(error)}`,
+          variant: "error",
+        })
+      }
+    }
+
+    const flagSession = (sessionID: string) => saveFlags(flagFor(flags.pending, sessionID, Date.now()))
+
+    const unflagSession = (sessionID: string) => {
+      const next = withoutFlag(flags.pending, sessionID)
+      return next.length === flags.pending.length ? Promise.resolve() : saveFlags(next)
+    }
+
+    /**
+     * Empties a session's note record. The TUI storage can read, write and
+     * overwrite a key but has no `remove`, so an empty record is the closest the
+     * API allows (see README) — and the page writes nothing into it again once
+     * the session is gone.
+     */
+    const dropNote = (sessionID: string) => {
+      const [, set] = context.storage.store(noteKey(sessionID), { initial: { text: "" } })
+      return Promise.resolve(
+        set((draft) => {
+          draft.text = ""
+        }),
+      )
+    }
+
+    /** Deletes a session the note created and left empty; the failure is reported, the screen is already home. */
+    const removeSession = async (sessionID: string) => {
+      try {
+        await context.client.session.remove({ sessionID })
+      } catch (error) {
+        console.error("opencode-notepad: could not delete the empty chat", messageOf(error))
+        context.ui.toast.show({
+          title: "Note",
+          message: `Could not delete the empty chat: ${messageOf(error)}`,
+          variant: "error",
+        })
+      }
+    }
+
+    /**
+     * Drops the flags whose session is gone (deleted while the TUI was closed).
+     * The tab bar cannot answer that — a session may simply have no tab — so
+     * the server is asked, from `open()` where the connection is certainly up.
+     * A failed lookup drops the flag rather than keeping it: the worst case is
+     * a question that is never asked, never a chat deleted on a guess.
+     */
+    const pruneFlags = async () => {
+      for (const flag of [...flags.pending]) {
+        if (flag.flaggedAt >= openedAt) continue
+        try {
+          await context.client.session.get({ sessionID: flag.sessionID })
+        } catch (error) {
+          console.error("opencode-notepad: dropping a flag whose chat is gone", messageOf(error))
+          await unflagSession(flag.sessionID)
+        }
       }
     }
 
@@ -187,9 +281,30 @@ export default Plugin.define({
      * selected) is written into the chat prompt of its own session once the
      * host has restored that screen.
      */
-    const closePage = (insert?: string) => {
+    const closePage = (insert?: string, text = "") => {
       const state = page
       page = undefined
+      // Inserting is proof the chat is in use, whichever page it was opened
+      // from (the note reopened over the chat it landed in is an ordinary page
+      // with `created: false`): the chat-less question no longer applies.
+      if (state && insert !== undefined) void unflagSession(state.sessionID)
+      if (state?.created && insert === undefined) {
+        if (!text.trim()) {
+          // An empty note leaves nothing behind: the session the page had to
+          // create is removed again and the user is back on the new-chat
+          // screen, where the page was opened.
+          context.ui.router.navigate({ type: "home" })
+          void removeSession(state.sessionID)
+          return
+        } else {
+          // The note has text, so it must stay reachable: land in the chat it
+          // belongs to — the same destination Insert uses, without pasting —
+          // and remember that the chat still has no messages of its own.
+          context.ui.router.navigate(insertRoute(state))
+          void flagSession(state.sessionID)
+          return
+        }
+      }
       // Closing returns to the chat the page was opened over (or home when the
       // page had to create the chat). Insert instead goes to the note's own
       // chat, which is where its text has to be pasted. Neither resolves a
@@ -256,20 +371,105 @@ export default Plugin.define({
     // Deleting a chat deletes its note. The note never leaves the plugin's
     // durable store, so clearing the key is the whole cleanup. The mutator
     // returns a promise: it is caught here, because a rejected write must not
-    // surface as an unhandled rejection in the host.
+    // surface as an unhandled rejection in the host. The session's chat-less
+    // flag goes with it: there is no chat left to ask about.
     const stop = context.data.on("session.deleted", (event) => {
-      const failed = (error: unknown) =>
-        console.error("opencode-notepad: could not clear the note of a deleted session", messageOf(error))
+      const sessionID = event.data.sessionID
+      dropNote(sessionID).catch((error) =>
+        console.error("opencode-notepad: could not clear the note of a deleted session", messageOf(error)),
+      )
+      void unflagSession(sessionID)
+    })
+
+    /**
+     * The chat-less question, asked once per disappearance. A session that was
+     * flagged and is gone from the tab bar has its tab closed: the note is the
+     * only thing in it, so ask before deleting it. The chat is never deleted on
+     * a guess — if it has messages, or the check cannot be made, the flag is
+     * simply dropped and the chat stays. Never rejects: it is called from an
+     * effect, where a rejection would surface in the host.
+     */
+    const settlingChats = new Set<string>()
+    const checkChatless = async (sessionID: string) => {
+      if (settlingChats.has(sessionID)) return
+      settlingChats.add(sessionID)
       try {
-        const [, set] = context.storage.store(noteKey(event.data.sessionID), { initial: { text: "" } })
-        Promise.resolve(
-          set((draft) => {
-            draft.text = ""
-          }),
-        ).catch(failed)
+        // Chatting in the session answers the question before it is asked: the
+        // chat is not chat-less any more.
+        let messages: readonly unknown[]
+        try {
+          messages = await context.client.session.context({ sessionID })
+        } catch (error) {
+          console.error("opencode-notepad: could not read a chat-less chat", messageOf(error))
+          await unflagSession(sessionID)
+          return
+        }
+        if (messages.length > 0) {
+          await unflagSession(sessionID)
+          return
+        }
+        const confirmed = await context.ui.dialog.confirm({
+          title: "Delete this chat?",
+          message: "This chat has no messages, only the note written from it. Delete the chat and its note?",
+          label: { confirm: "Delete", cancel: "Keep" },
+        })
+        if (!confirmed) {
+          // Keeping means keeping both, with the tab left closed.
+          await unflagSession(sessionID)
+          return
+        }
+        await context.client.session.remove({ sessionID })
+        await dropNote(sessionID)
+        await unflagSession(sessionID)
       } catch (error) {
-        failed(error)
+        console.error("opencode-notepad: could not settle a chat-less chat", messageOf(error))
+        context.ui.toast.show({
+          title: "Note",
+          message: `Could not settle the empty chat: ${messageOf(error)}`,
+          variant: "error",
+        })
+      } finally {
+        settlingChats.delete(sessionID)
       }
+    }
+
+    /**
+     * Flags survive a restart, so "disappeared" has to be an edge: only a
+     * session this process has actually seen open and then not open counts.
+     * A flag loaded at startup with no tab open was never closed here and
+     * prompts nothing; the tab has to be seen first.
+     */
+    const seenOpen = new Set<string>()
+    const disposeFlags = createRoot((dispose) => {
+      createEffect(() => {
+        if (!context.ui.tabs.enabled()) return
+        const open = new Set(context.ui.tabs.list().map((tab) => tab.sessionID))
+        for (const flag of [...flags.pending]) {
+          const sessionID = flag.sessionID
+          if (open.has(sessionID)) {
+            seenOpen.add(sessionID)
+            continue
+          }
+          // Chatting in it answers the question before it is asked. The flag
+          // itself is not pruned here: a session without a tab is not gone, and
+          // only the server knows which ones are (see `pruneFlags`).
+          let used = false
+          try {
+            used = context.data.session.message.list(sessionID).length > 0
+          } catch {
+            used = false
+          }
+          if (used) {
+            seenOpen.delete(sessionID)
+            void unflagSession(sessionID)
+            continue
+          }
+          if (!seenOpen.has(sessionID)) continue
+          seenOpen.delete(sessionID)
+          void checkChatless(sessionID)
+        }
+      })
+      return dispose
     })
 
     context.keymap.layer(() => ({
@@ -290,6 +490,7 @@ export default Plugin.define({
     }))
 
     return () => {
+      disposeFlags()
       stop()
       unregister()
     }
@@ -302,7 +503,8 @@ interface NoteProps {
   readonly created: boolean
   /** The chat's working directory, resolved by the host when the page opened. */
   readonly directory: string
-  readonly close: (insert?: string) => void
+  /** Leaves the page: `insert` is the text to paste, `text` the note as it was left. */
+  readonly close: (insert?: string, text?: string) => void
 }
 
 function Note(props: NoteProps) {
@@ -623,7 +825,9 @@ function Note(props: NoteProps) {
 
   const close = () => {
     flush(false)
-    props.close()
+    // The note as it stands decides whether the page has anything left to keep:
+    // an empty one takes the session it created with it.
+    props.close(undefined, currentText())
   }
 
   /**

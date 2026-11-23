@@ -58,6 +58,13 @@ export function noteKey(sessionID: string): string {
   return `${NOTE_KEY_PREFIX}.${encodeSessionID(sessionID)}`
 }
 
+/**
+ * Key of the chat-less flag list. A note key always starts with
+ * `NOTE_KEY_PREFIX` followed by a hex segment, so a second prefix cannot
+ * collide with one.
+ */
+export const FLAGS_KEY = `${NOTE_KEY_PREFIX}-flags.pending`
+
 /** The pre-encoding key for a session, read only when migrating an old note. */
 export function legacyNoteKey(sessionID: string): string {
   return `${NOTE_KEY_PREFIX}.${storageSegment(sessionID)}`
