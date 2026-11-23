@@ -1,6 +1,6 @@
 {
   "name": "@catronomix/opencode-notepad",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Per-chat scratchpad overlay for opencode: insert, save, load, format and /btw without touching the chat transcript",
   "license": "MIT",
   "author": "catronomix",
