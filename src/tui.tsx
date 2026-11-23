@@ -108,14 +108,27 @@ export default Plugin.define({
       return current.type === "plugin" && current.name === PAGE
     }
 
+    /** Whether that chat's screen is the current route. */
+    const onChat = (sessionID: string) => {
+      const current = context.ui.router.current()
+      return current.type === "session" && current.sessionID === sessionID
+    }
+
     /**
      * Bumped once the page has actually been left. The chat-less reconciler
      * cannot ask anything while the note is on screen (see the effect), and
      * `router.current()` is not reactive, so leaving has to say so explicitly.
      */
     const [pageEpoch, setPageEpoch] = createSignal(0)
+    /** The same signal's pending tick; tracked so teardown can cancel it. */
+    const resumeTimers = new Set<ReturnType<typeof setTimeout>>()
     const resumeFlags = () => {
-      setTimeout(() => setPageEpoch((epoch) => epoch + 1), 0)
+      if (stopped) return
+      const timer = setTimeout(() => {
+        resumeTimers.delete(timer)
+        setPageEpoch((epoch) => epoch + 1)
+      }, 0)
+      resumeTimers.add(timer)
     }
 
     /**
@@ -409,6 +422,8 @@ export default Plugin.define({
      */
     const seenOpen = new Set<string>()
     const settlingChats = new Set<string>()
+    /** Sessions whose question failed mid-tail: not re-asked automatically. */
+    const failedChecks = new Set<string>()
     let asking = false
     /**
      * A tab that vanishes and comes back is not a close: changing route drops
@@ -433,8 +448,10 @@ export default Plugin.define({
           seenOpen.add(sessionID)
           return
         }
-        if (onPage()) {
-          // The note is open: ask once the user has left it.
+        // Neither the note nor the chat itself may be on screen: a dialog over
+        // a chat that is still loading (a slow restore) is the same mistake as
+        // one over the note page.
+        if (onPage() || onChat(sessionID)) {
           seenOpen.add(sessionID)
           return
         }
@@ -514,6 +531,7 @@ export default Plugin.define({
         await unflagSession(sessionID)
       } catch (error) {
         if (stopped) return
+        failedChecks.add(sessionID)
         console.error("opencode-notepad: could not settle a chat-less chat", messageOf(error))
         try {
           context.ui.toast.show({
@@ -526,6 +544,15 @@ export default Plugin.define({
         }
       } finally {
         settlingChats.delete(sessionID)
+        // Re-arm unconditionally: a tail that ended before writing a flag (a
+        // held question, a rejected remove) must not strand another session's
+        // question. A session whose own tail failed is not re-asked, so a
+        // persistent failure cannot loop the dialog.
+        if (!stopped) {
+          const pending = flags.pending.some((flag) => flag.sessionID === sessionID)
+          if (pending && !failedChecks.has(sessionID)) seenOpen.add(sessionID)
+          resumeFlags()
+        }
       }
     }
 
@@ -593,6 +620,8 @@ export default Plugin.define({
       stopped = true
       for (const timer of pendingChecks.values()) clearTimeout(timer)
       pendingChecks.clear()
+      for (const timer of resumeTimers) clearTimeout(timer)
+      resumeTimers.clear()
       disposeFlags()
       stop()
       unregister()
