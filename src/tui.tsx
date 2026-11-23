@@ -510,8 +510,9 @@ export default Plugin.define({
         let confirmed: boolean | undefined
         try {
           confirmed = await context.ui.dialog.confirm({
-            title: "Delete this chat?",
-            message: "This chat has no messages, only the note written from it. Delete the chat and its note?",
+            title: "Delete session?",
+            message:
+              "You are closing an empty session which has a note attached. Deleting this session will discard the note",
             label: { confirm: "Delete", cancel: "Keep" },
           })
         } finally {
