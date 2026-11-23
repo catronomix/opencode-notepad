@@ -149,9 +149,10 @@ context by itself; the transmissions above are the requests themselves.
   owns the keyboard — the note's textarea is blurred and not focusable.
 - A brand-new chat has no session yet; opening the note commits one through the
   API (no prompt, no model call) so the note has somewhere stable to live.
-  Leaving an empty note deletes that chat again and returns to the new-chat
-  screen; leaving a note with text opens the chat the note belongs to — the same
-  chat `Insert` targets, without pasting — so the text stays reachable. That chat
+  Leaving a note that is still empty (not a single character) deletes that chat
+  again and returns to the new-chat screen; leaving any note with text — even
+  only whitespace — opens the chat the note belongs to, the same chat `Insert`
+  targets, without pasting, so the text stays reachable. That chat
   is remembered as chat-less: if you close its tab before ever sending a
   message, the note asks whether to delete the chat and its note (No keeps both
   and leaves the tab closed). Chatting in it, or inserting the note, forgets the

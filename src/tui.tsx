@@ -99,11 +99,23 @@ export default Plugin.define({
     // The page is a fresh component on every open; this is the state a route
     // reload cannot carry (renderable identity).
     let page: PageState | undefined
+    /** Set first thing on teardown: no async tail may touch the host after it. */
+    let stopped = false
 
     /** Whether the plugin page is the route the host is showing right now. */
     const onPage = () => {
       const current = context.ui.router.current()
       return current.type === "plugin" && current.name === PAGE
+    }
+
+    /**
+     * Bumped once the page has actually been left. The chat-less reconciler
+     * cannot ask anything while the note is on screen (see the effect), and
+     * `router.current()` is not reactive, so leaving has to say so explicitly.
+     */
+    const [pageEpoch, setPageEpoch] = createSignal(0)
+    const resumeFlags = () => {
+      setTimeout(() => setPageEpoch((epoch) => epoch + 1), 0)
     }
 
     /**
@@ -213,6 +225,7 @@ export default Plugin.define({
         })
       } catch (error) {
         console.error("opencode-notepad: could not save the chat-less chat flags", messageOf(error))
+        if (stopped) return
         context.ui.toast.show({
           title: "Note",
           message: `Could not save the chat-less chat flags: ${messageOf(error)}`,
@@ -249,6 +262,7 @@ export default Plugin.define({
         await context.client.session.remove({ sessionID })
       } catch (error) {
         console.error("opencode-notepad: could not delete the empty chat", messageOf(error))
+        if (stopped) return
         context.ui.toast.show({
           title: "Note",
           message: `Could not delete the empty chat: ${messageOf(error)}`,
@@ -266,6 +280,7 @@ export default Plugin.define({
      */
     const pruneFlags = async () => {
       for (const flag of [...flags.pending]) {
+        if (stopped) return
         if (flag.flaggedAt >= openedAt) continue
         try {
           await context.client.session.get({ sessionID: flag.sessionID })
@@ -289,11 +304,14 @@ export default Plugin.define({
       // with `created: false`): the chat-less question no longer applies.
       if (state && insert !== undefined) void unflagSession(state.sessionID)
       if (state?.created && insert === undefined) {
-        if (!text.trim()) {
-          // An empty note leaves nothing behind: the session the page had to
-          // create is removed again and the user is back on the new-chat
-          // screen, where the page was opened.
+        if (text.length === 0) {
+          // A note with no characters at all leaves nothing behind: the session
+          // the page had to create is removed again and the user is back on the
+          // new-chat screen, where the page was opened. A note that only holds
+          // whitespace is not empty — it becomes text in the chat, below — so
+          // nothing the user typed can be stranded under a deleted session.
           context.ui.router.navigate({ type: "home" })
+          resumeFlags()
           void removeSession(state.sessionID)
           return
         } else {
@@ -301,6 +319,7 @@ export default Plugin.define({
           // belongs to — the same destination Insert uses, without pasting —
           // and remember that the chat still has no messages of its own.
           context.ui.router.navigate(insertRoute(state))
+          resumeFlags()
           void flagSession(state.sessionID)
           return
         }
@@ -312,6 +331,7 @@ export default Plugin.define({
       // route that becomes current, so an existing chat reuses its screen.
       const destination = state ? (insert === undefined ? returnRoute(state) : insertRoute(state)) : { type: "home" as const }
       context.ui.router.navigate(destination)
+      resumeFlags()
 
       if (insert !== undefined) {
         const started = Date.now()
@@ -382,16 +402,67 @@ export default Plugin.define({
     })
 
     /**
+     * Flags survive a restart, so "disappeared" has to be an edge: only a
+     * session this process has actually seen open and then not open counts.
+     * A flag loaded at startup with no tab open was never closed here and
+     * prompts nothing; the tab has to be seen first.
+     */
+    const seenOpen = new Set<string>()
+    const settlingChats = new Set<string>()
+    let asking = false
+    /**
+     * A tab that vanishes and comes back is not a close: changing route drops
+     * it for a moment (the plugin page has no tab of its own). The question is
+     * asked only after the absence has held for a moment, and the tab bar is
+     * read again then.
+     */
+    const pendingChecks = new Map<string, ReturnType<typeof setTimeout>>()
+    const scheduleCheck = (sessionID: string) => {
+      if (pendingChecks.has(sessionID)) return
+      const timer = setTimeout(() => {
+        pendingChecks.delete(sessionID)
+        if (stopped) return
+        let open = false
+        try {
+          open = context.ui.tabs.list().some((tab) => tab.sessionID === sessionID)
+        } catch {
+          open = false
+        }
+        if (open) {
+          // The chat is on screen again; a later close starts a new edge.
+          seenOpen.add(sessionID)
+          return
+        }
+        if (onPage()) {
+          // The note is open: ask once the user has left it.
+          seenOpen.add(sessionID)
+          return
+        }
+        void checkChatless(sessionID)
+      }, 250)
+      pendingChecks.set(sessionID, timer)
+    }
+
+    /**
      * The chat-less question, asked once per disappearance. A session that was
      * flagged and is gone from the tab bar has its tab closed: the note is the
      * only thing in it, so ask before deleting it. The chat is never deleted on
      * a guess — if it has messages, or the check cannot be made, the flag is
      * simply dropped and the chat stays. Never rejects: it is called from an
      * effect, where a rejection would surface in the host.
+     *
+     * Only one question is ever in flight (the host has one dialog), and none
+     * survives teardown: `stopped` is checked after every await, before the
+     * chat is touched or the user is told anything.
      */
-    const settlingChats = new Set<string>()
     const checkChatless = async (sessionID: string) => {
-      if (settlingChats.has(sessionID)) return
+      if (stopped) return
+      if (asking || settlingChats.has(sessionID)) {
+        // Held back rather than dropped: the flag write that ends the question
+        // in flight re-runs the effect, which asks about this one then.
+        if (asking) seenOpen.add(sessionID)
+        return
+      }
       settlingChats.add(sessionID)
       try {
         // Chatting in the session answers the question before it is asked: the
@@ -400,49 +471,74 @@ export default Plugin.define({
         try {
           messages = await context.client.session.context({ sessionID })
         } catch (error) {
+          if (stopped) return
           console.error("opencode-notepad: could not read a chat-less chat", messageOf(error))
           await unflagSession(sessionID)
           return
         }
+        if (stopped) return
         if (messages.length > 0) {
           await unflagSession(sessionID)
           return
         }
-        const confirmed = await context.ui.dialog.confirm({
-          title: "Delete this chat?",
-          message: "This chat has no messages, only the note written from it. Delete the chat and its note?",
-          label: { confirm: "Delete", cancel: "Keep" },
-        })
+        // Another session's question may have started while the messages were
+        // being read; leaving `seenOpen` set lets the effect ask about this one
+        // later.
+        if (asking) {
+          seenOpen.add(sessionID)
+          return
+        }
+        seenOpen.delete(sessionID)
+        asking = true
+        let confirmed: boolean | undefined
+        try {
+          confirmed = await context.ui.dialog.confirm({
+            title: "Delete this chat?",
+            message: "This chat has no messages, only the note written from it. Delete the chat and its note?",
+            label: { confirm: "Delete", cancel: "Keep" },
+          })
+        } finally {
+          asking = false
+        }
+        // A quit dismisses the dialog: that must not count as an answer, and
+        // nothing may be deleted or saved once the plugin has stopped.
+        if (stopped) return
         if (!confirmed) {
           // Keeping means keeping both, with the tab left closed.
           await unflagSession(sessionID)
           return
         }
         await context.client.session.remove({ sessionID })
+        if (stopped) return
         await dropNote(sessionID)
         await unflagSession(sessionID)
       } catch (error) {
+        if (stopped) return
         console.error("opencode-notepad: could not settle a chat-less chat", messageOf(error))
-        context.ui.toast.show({
-          title: "Note",
-          message: `Could not settle the empty chat: ${messageOf(error)}`,
-          variant: "error",
-        })
+        try {
+          context.ui.toast.show({
+            title: "Note",
+            message: `Could not settle the empty chat: ${messageOf(error)}`,
+            variant: "error",
+          })
+        } catch {
+          // The host is gone: the log line above is all that is left to do.
+        }
       } finally {
         settlingChats.delete(sessionID)
       }
     }
 
-    /**
-     * Flags survive a restart, so "disappeared" has to be an edge: only a
-     * session this process has actually seen open and then not open counts.
-     * A flag loaded at startup with no tab open was never closed here and
-     * prompts nothing; the tab has to be seen first.
-     */
-    const seenOpen = new Set<string>()
     const disposeFlags = createRoot((dispose) => {
       createEffect(() => {
-        if (!context.ui.tabs.enabled()) return
+        // Leaving the page is not a tab change, so it is read explicitly.
+        pageEpoch()
+        if (stopped || !context.ui.tabs.enabled()) return
+        // A flagged chat can be on screen as an open note (the page the note
+        // landed in). Deleting it then would pull the session out from under an
+        // open editor whose cleanup still writes its note record, so the
+        // question waits until the page is gone (`resumeFlags`).
+        if (onPage()) return
         const open = new Set(context.ui.tabs.list().map((tab) => tab.sessionID))
         for (const flag of [...flags.pending]) {
           const sessionID = flag.sessionID
@@ -464,9 +560,11 @@ export default Plugin.define({
             void unflagSession(sessionID)
             continue
           }
+          // `scheduleCheck` re-adds the edge when the tab is only away for a
+          // moment, so a real close still asks afterwards.
           if (!seenOpen.has(sessionID)) continue
           seenOpen.delete(sessionID)
-          void checkChatless(sessionID)
+          scheduleCheck(sessionID)
         }
       })
       return dispose
@@ -490,6 +588,11 @@ export default Plugin.define({
     }))
 
     return () => {
+      // First: an in-flight question must not resolve into a deletion, and a
+      // tab bar emptied by the teardown must not start new questions.
+      stopped = true
+      for (const timer of pendingChecks.values()) clearTimeout(timer)
+      pendingChecks.clear()
       disposeFlags()
       stop()
       unregister()
